@@ -295,7 +295,9 @@ extract_img() { # img out_root
             tools+=("$BIN/extract.erofs")
             for tl in "${tools[@]}"; do
                 rm -rf "${root:?}/$name" "$root/config/${name}_"*
-                if "$tl" -x -i "$img" -o "$root" -T"$thr" > "$lg" 2>&1 && verify_extract "$root" "$name"; then
+                # timeout: extractor yang macet dianggap gagal -> coba extractor berikutnya
+                if timeout "${EXTRACT_TIMEOUT:-1800}" "$tl" -x -i "$img" -o "$root" -T"$thr" > "$lg" 2>&1 \
+                        && verify_extract "$root" "$name"; then
                     ok=1; log "  $name diekstrak dengan $tl"; break
                 fi
                 warn "$name: extractor $tl gagal/tidak lengkap, log:"
@@ -442,6 +444,8 @@ res_from_base() {
 
 patch_port_resources() {
     local item f src
+    DEBLOAT_KEEP=$(debloat_keep)
+    if [[ -n ${DEBLOAT_KEEP// /} ]]; then log "debloat keep: $DEBLOAT_KEEP"; fi
     for item in $REPLACE_FROM_BASE; do
         case $item in
             device_features)
@@ -476,7 +480,7 @@ patch_port_resources() {
         local d freed=0 sz
         # isi semua folder data-app dihapus, kecuali yang ada di DEBLOAT_SAFE_KEEP
         while IFS= read -r -d '' d; do
-            if in_list "$(basename "$d")" "$DEBLOAT_SAFE_KEEP"; then
+            if in_list "$(basename "$d")" "$DEBLOAT_SAFE_KEEP" || is_kept "${d#"$P_FS"/}" "$(basename "$d")"; then
                 log "debloat (safe): ${d#"$P_FS"/} dipertahankan"; continue
             fi
             sz=$(du -sb "$d" | cut -f1); freed=$(( freed + sz ))
@@ -494,13 +498,13 @@ patch_port_resources() {
         item=${item#/}
         case $item in *..*|"") warn "debloat: path '$item' tidak valid, dilewati"; continue ;; esac
         if [[ -e $P_FS/$item ]]; then
-            if in_list "$(basename "$item")" "$PROTECTED_APPS"; then warn "debloat: $item dilindungi"; continue; fi
+            if is_kept "$item" "$(basename "$item")"; then log "debloat: $item dipertahankan (keep/dilindungi)"; continue; fi
             sz=$(du -sb "$P_FS/$item" | cut -f1)
             rm -rf "${P_FS:?}/$item"; ok "debloat: $item ($(( sz / 1048576 )) MB)"
         else
             log "debloat: $item tidak ada, dilewati"
         fi
-    done < <(debloat_tokens | grep '/' | sort -u || true)
+    done < <(debloat_tokens | grep -v '^!' | grep '/' | sort -u || true)
 
     check_ime_left
 }
@@ -544,11 +548,23 @@ debloat_tokens() {
         | sed -e 's/#.*//' | tr ',' '\n' | sed -e 's/|.*//' | tr -s '[:space:]' '\n' | grep -v '^$' || true
 }
 
+# daftar keep: token berawalan '!' di debloat_packages.txt / input debloat (package, folder, atau path)
+debloat_keep() { debloat_tokens | grep '^!' | sed 's/^!//' | sort -u | tr '\n' ' ' || true; }
+
+is_kept() { # nilai... -> 0 kalau salah satu ada di keep list / proteksi bawaan
+    local v
+    for v in "$@"; do
+        [[ -n $v ]] || continue
+        if in_list "$v" "$DEBLOAT_KEEP $PROTECTED_APPS $PROTECTED_PACKAGES"; then return 0; fi
+    done
+    return 1
+}
+
 # debloat berdasarkan nama package (com.xxx) dan nama folder APK (MiuiCompass).
 # Yang tidak ada di ROM dilewati, build tidak dibatalkan.
 debloat_packages() {
     local toks pkgs apps idx="$WORK/apk_index.tsv" pkg app dir d sz freed=0 hit=0 miss=""
-    toks=$(debloat_tokens)
+    toks=$(debloat_tokens | grep -v '^!' || true)
     pkgs=$(grep -E '^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$' <<< "$toks" | sort -u | tr '\n' ' ' || true)
     apps=$(grep -E '^[A-Za-z][A-Za-z0-9_-]*$' <<< "$toks" | sort -u | tr '\n' ' ' || true)
     [[ -n ${pkgs// /}${apps// /} ]] || return 0
@@ -559,8 +575,8 @@ debloat_packages() {
         python3 "$SCRIPT_DIR/apk_index.py" "$P_FS" > "$idx"
         log "  $(wc -l < "$idx") APK terindeks di ROM port"
         for pkg in $pkgs; do
-            if in_list "$pkg" "$PROTECTED_PACKAGES"; then warn "debloat: $pkg dilindungi (penting untuk boot)"; continue; fi
             dir=$(awk -F'\t' -v p="$pkg" '$1 == p {print $2; exit}' "$idx")
+            if is_kept "$pkg" "$dir" "${dir##*/}"; then log "debloat: $pkg dipertahankan (keep/dilindungi)"; continue; fi
             if [[ -z $dir || ! -d $P_FS/$dir ]]; then miss+=" $pkg"; continue; fi
             sz=$(du -sb "$P_FS/$dir" | cut -f1); freed=$(( freed + sz )); hit=$((hit + 1))
             rm -rf "${P_FS:?}/$dir"
@@ -570,7 +586,7 @@ debloat_packages() {
 
     # --- nama folder APK (di app/, priv-app/, data-app/ semua partisi port)
     for app in $apps; do
-        if in_list "$app" "$PROTECTED_APPS"; then warn "debloat: $app dilindungi (penting untuk boot)"; continue; fi
+        if is_kept "$app"; then log "debloat: $app dipertahankan (keep/dilindungi)"; continue; fi
         local found=0
         while IFS= read -r -d '' d; do
             sz=$(du -sb "$d" | cut -f1); freed=$(( freed + sz )); hit=$((hit + 1)); found=1
