@@ -77,6 +77,7 @@ env:
   BOOT_IMG: https://github.com/Yudharmdn/boot-melt-rebase/releases/download/boot-melt-rebase/boot.img
   # Gboard sebagai keyboard sistem (product/app/LatinImeGoogle); kosongkan untuk tidak menambah
   GBOARD_APK: https://github.com/Yudharmdn/boot-melt-rebase/releases/download/boot-melt-rebase/LatinImeGoogle.apk
+  GBOARD_PACKAGE: com.charlie.android.inputmethod.latin
   REPLACE_FROM_BASE: "device_features displayconfig overlay camera"
   DEBLOAT_PRESET: none         # debloat hanya dari debloat_packages.txt (safe = + hapus semua data-app)
   DEBLOAT_SAFE_KEEP: "MIUIGallery"   # folder data-app yang dipertahankan (pisah spasi)
