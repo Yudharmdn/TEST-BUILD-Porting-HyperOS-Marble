@@ -1,0 +1,226 @@
+name: Port HyperOS -> marble (Recovery)
+
+# Quick-port HyperOS dari device donor ke POCO F5 (marble).
+# Base (firmware, boot, vendor_boot, dtbo, vendor, odm, *_dlkm) = ROM resmi marble
+# Port (system, system_ext, product, mi_ext)                   = ROM donor HyperOS
+# Output: zip flashable recovery (OrangeFox/TWRP):
+#   META-INF/com/google/android/update-binary + images/*.img (+ super.img)
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_rom_url:
+        description: "URL ROM resmi marble (fastboot .tgz disarankan, atau OTA .zip)"
+        required: true
+        type: string
+      port_rom_url:
+        description: "URL ROM donor HyperOS (OTA .zip berisi payload.bin, contoh HyperOS4.0.0.24.XPKCNXM)"
+        required: true
+        type: string
+      super_size:
+        description: "Ukuran super (byte). auto = baca dari super.img base fastboot"
+        required: false
+        default: "auto"
+        type: string
+      ext4_partitions:
+        description: "Partisi yang dibangun EXT4 (sisanya EROFS)"
+        required: false
+        default: "vendor odm"
+        type: string
+      debloat:
+        description: "Path yang dihapus dari port, pisah spasi (mis. product/app/Foo)"
+        required: false
+        default: ""
+        type: string
+      disable_encryption:
+        description: "Matikan fileencryption/metadata_encryption di fstab"
+        required: false
+        default: true
+        type: boolean
+      rw_mount:
+        description: "Mount partisi EXT4 sebagai rw"
+        required: false
+        default: true
+        type: boolean
+      debug_adb:
+        description: "ADB aktif sejak boot (untuk logcat saat bootloop)"
+        required: false
+        default: true
+        type: boolean
+      recovery_img_url:
+        description: "Opsional: URL recovery.img custom (OrangeFox). Kosong = recovery HP tidak disentuh"
+        required: false
+        default: ""
+        type: string
+      release_repo:
+        description: "owner/repo untuk GitHub Release (kosong = upload artifact)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: port-hyperos-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # ---- default yang bisa diubah di sini ----
+  TARGET_DEVICE: marble
+  PORT_PARTITIONS: "system system_ext product mi_ext"
+  DISABLE_AVB: "true"
+  EROFS_COMP: "lz4hc,9"
+  EXT4_HEADROOM_MB: "128"
+  RECOVERY_SUPER: raw          # raw = images/super.img | zst = images/super.img.zst (zip lebih kecil)
+  REPLACE_FROM_BASE: "device_features displayconfig overlay camera"
+  ZIP_LEVEL: "1"
+  TOOLKIT_REPO: toraidl/hyperos_port
+  TOOLKIT_SHA: 523b0f6378e77e9e93ba6e15a064f45b26274eab
+  SPLIT_SIZE: 1900M
+
+jobs:
+  port:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: Kosongkan disk runner
+        uses: jlumbroso/free-disk-space@v2
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install dependensi
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aria2 zstd zip unzip e2fsprogs python3 >/dev/null
+          aria2c --version | head -n1
+
+      - name: Ambil toolkit (pinned)
+        run: |
+          set -euo pipefail
+          git init -q toolkit
+          cd toolkit
+          git remote add origin "https://github.com/${TOOLKIT_REPO}.git"
+          git sparse-checkout set --no-cone '/bin/Linux/x86_64/' '/bin/*.py' '/bin/imgextractor/' '/bin/flash/zstd'
+          git fetch -q --depth 1 --filter=blob:none origin "$TOOLKIT_SHA"
+          git checkout -q FETCH_HEAD
+          chmod +x bin/Linux/x86_64/*
+          echo "TOOLS_DIR=$PWD" >> "$GITHUB_ENV"
+
+      - name: Pilih lokasi kerja (disk paling lega)
+        run: |
+          set -euo pipefail
+          best="$GITHUB_WORKSPACE"; best_free=$(df --output=avail -B1 "$GITHUB_WORKSPACE" | tail -n1)
+          if [ -d /mnt ]; then
+            mnt_free=$(df --output=avail -B1 /mnt | tail -n1)
+            if [ "$mnt_free" -gt "$best_free" ]; then
+              sudo mkdir -p /mnt/port && sudo chown "$USER" /mnt/port
+              best=/mnt/port; best_free=$mnt_free
+            fi
+          fi
+          echo "WORK=$best/work" >> "$GITHUB_ENV"
+          echo "OUT=$GITHUB_WORKSPACE/out" >> "$GITHUB_ENV"
+          df -h "$GITHUB_WORKSPACE" /mnt 2>/dev/null || true
+          echo "Lokasi kerja: $best ($((best_free / 1073741824)) GB bebas)"
+
+      - name: Port ROM
+        id: port
+        env:
+          BASE_ROM: ${{ inputs.base_rom_url }}
+          PORT_ROM: ${{ inputs.port_rom_url }}
+          SUPER_SIZE: ${{ inputs.super_size }}
+          EXT4_PARTITIONS: ${{ inputs.ext4_partitions }}
+          DEBLOAT: ${{ inputs.debloat }}
+          DISABLE_ENCRYPTION: ${{ inputs.disable_encryption }}
+          RW_MOUNT: ${{ inputs.rw_mount }}
+          DEBUG_ADB: ${{ inputs.debug_adb }}
+          RECOVERY_IMG: ${{ inputs.recovery_img_url }}
+        run: |
+          set -euo pipefail
+          sudo -E env "PATH=$PATH" bash scripts/port.sh
+          sudo chown -R "$USER" "$OUT"
+
+      - name: Upload artifact
+        if: ${{ inputs.release_repo == '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.port.outputs.name }}
+          path: |
+            out/*.zip
+            out/*.sha256
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload ke GitHub Release
+        if: ${{ inputs.release_repo != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          RELEASE_REPO: ${{ inputs.release_repo }}
+          ZIP: ${{ steps.port.outputs.zip }}
+          NAME: ${{ steps.port.outputs.name }}
+          PORT_VERSION: ${{ steps.port.outputs.port_version }}
+          DONOR: ${{ steps.port.outputs.donor }}
+        run: |
+          set -euo pipefail
+          [ -n "${GH_TOKEN:-}" ] || { echo "::error::secret RELEASE_TOKEN belum diisi"; exit 1; }
+          cd "$(dirname "$ZIP")"
+          file=$(basename "$ZIP")
+          assets=("$file.sha256")
+          if [ "$(stat -c%s "$file")" -gt 2000000000 ]; then
+            split -b "$SPLIT_SIZE" -d -a 2 "$file" "$file.part"
+            rm -f "$file"
+            for p in "$file".part*; do assets+=("$p"); done
+            join_note=$(printf 'File dipecah (limit 2 GB per asset). Gabungkan dulu:\n\n    Linux/macOS: cat %s.part* > %s\n    Windows:     copy /b %s.part00+%s.part01+... %s\n' "$file" "$file" "$file" "$file" "$file")
+          else
+            assets+=("$file")
+            join_note=""
+          fi
+          tag="${NAME}-r${GITHUB_RUN_NUMBER}"
+          {
+            echo "HyperOS ${PORT_VERSION} port untuk ${TARGET_DEVICE} (donor: ${DONOR})"
+            echo
+            echo "Flash lewat OrangeFox/TWRP: Install zip -> Format Data (ketik yes) -> Reboot System."
+            echo "Recovery HP tetap dipertahankan kecuali build memakai recovery_img_url."
+            echo
+            echo "$join_note"
+          } > notes.md
+          gh release create "$tag" "${assets[@]}" --repo "$RELEASE_REPO" \
+            --title "$NAME" --notes-file notes.md
+
+      - name: Ringkasan
+        if: always()
+        env:
+          DONOR: ${{ steps.port.outputs.donor }}
+          PORT_VERSION: ${{ steps.port.outputs.port_version }}
+          NAME: ${{ steps.port.outputs.name }}
+          EXT4_PARTITIONS: ${{ inputs.ext4_partitions }}
+          DISABLE_ENCRYPTION: ${{ inputs.disable_encryption }}
+          RW_MOUNT: ${{ inputs.rw_mount }}
+          DEBUG_ADB: ${{ inputs.debug_adb }}
+        run: |
+          {
+            echo "## Port HyperOS -> ${TARGET_DEVICE}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Donor | ${DONOR:-?} |"
+            echo "| Versi | ${PORT_VERSION:-?} |"
+            echo "| Output | ${NAME:-gagal} |"
+            echo "| EXT4 | ${EXT4_PARTITIONS} |"
+            echo "| Encryption off | ${DISABLE_ENCRYPTION} |"
+            echo "| RW | ${RW_MOUNT} |"
+            echo "| Debug ADB | ${DEBUG_ADB} |"
+            echo "| Format super | ${RECOVERY_SUPER} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          
