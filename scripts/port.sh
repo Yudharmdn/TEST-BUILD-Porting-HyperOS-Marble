@@ -28,10 +28,11 @@ DEBLOAT=${DEBLOAT:-""}
 EROFS_COMP=${EROFS_COMP:-"lz4hc,9"}
 EXT4_HEADROOM_MB=${EXT4_HEADROOM_MB:-128}
 RECOVERY_SUPER=${RECOVERY_SUPER:-raw}      # raw = images/super.img | zst = images/super.img.zst
-RECOVERY_IMG=${RECOVERY_IMG:-}
-BOOT_IMG=${BOOT_IMG:-}
+RECOVERY_IMG=${RECOVERY_IMG:-}              # opsional: URL/path recovery.img custom (OrangeFox dll)
+BOOT_IMG=${BOOT_IMG:-}                      # opsional: URL/path boot.img custom (kernel), menggantikan boot.img base
 GBOARD_APK=${GBOARD_APK:-}                  # opsional: URL/path Gboard (LatinImeGoogle.apk) -> jadi keyboard sistem
-GBOARD_DIR=${GBOARD_DIR:-product/app/LatinImeGoogle}                      # opsional: URL/path boot.img custom (kernel), menggantikan boot.img base              # opsional: URL/path recovery.img custom (OrangeFox dll)
+GBOARD_DIR=${GBOARD_DIR:-product/app/LatinImeGoogle}
+GBOARD_PACKAGE=${GBOARD_PACKAGE:-com.charlie.android.inputmethod.latin}   # package yang diharapkan dari GBOARD_APK
 ZIP_LEVEL=${ZIP_LEVEL:-1}
 KEEP_DOWNLOADS=${KEEP_DOWNLOADS:-false}
 DEBLOAT_PACKAGES_FILE=${DEBLOAT_PACKAGES_FILE:-}   # default: <repo>/debloat_packages.txt
@@ -112,8 +113,8 @@ check_url() { # label url
     [[ $url =~ ^https?:// ]] || return 0
     name=${url%%\?*}; name=${name##*/}
     case $name in
-        *.zip|*.tgz|*.tar.gz|*.tar|*.tar.zst|*.tar.xz|*.bin|*.img) ;;
-        *) warn "$label: nama file '$name' tidak berakhiran .zip/.tgz/.img - URL kemungkinan terpotong" ;;
+        *.zip|*.tgz|*.tar.gz|*.tar|*.tar.zst|*.tar.xz|*.bin|*.img|*.apk) ;;
+        *) warn "$label: nama file '$name' tidak berakhiran .zip/.tgz/.img/.apk - URL kemungkinan terpotong" ;;
     esac
     code=$(curl -sL -r 0-0 -o /dev/null -w '%{http_code}' --retry 2 --max-time 60 "$url" || echo 000)
     case $code in
@@ -449,7 +450,7 @@ patch_port_resources() {
     DEBLOAT_KEEP=$(debloat_keep)
     if [[ -n $GBOARD_APK ]]; then
         add_gboard
-        DEBLOAT_KEEP+=" $GBOARD_DIR ${GBOARD_DIR##*/} com.google.android.inputmethod.latin"
+        DEBLOAT_KEEP+=" $GBOARD_DIR ${GBOARD_DIR##*/} $GBOARD_PACKAGE ${GBOARD_PKG_REAL:-}"
     fi
     if [[ -n ${DEBLOAT_KEEP// /} ]]; then log "debloat keep: $DEBLOAT_KEEP"; fi
     for item in $REPLACE_FROM_BASE; do
@@ -518,41 +519,55 @@ patch_port_resources() {
 # Gboard sebagai aplikasi sistem. Jadi keyboard default kalau keyboard sistem lain
 # (Sogou/Baidu) di-debloat: Android memilih IME sistem yang tersisa saat boot pertama.
 add_gboard() {
-    local src dst="$P_FS/$GBOARD_DIR" name pkg abi n
+    local src dst="$P_FS/$GBOARD_DIR" name pkg n
     name=${GBOARD_DIR##*/}
     if [[ ! -d $P_FS/${GBOARD_DIR%%/*} ]]; then warn "Gboard: partisi ${GBOARD_DIR%%/*} tidak ada, dilewati"; return 0; fi
     src=$(fetch "$GBOARD_APK" "$WORK/dl" "$name.apk")
     pkg=$(python3 "$SCRIPT_DIR/apk_index.py" --apk "$src")
     [[ -n $pkg ]] || die "GBOARD_APK bukan APK valid (AndroidManifest tidak terbaca)"
-    if [[ $pkg != com.google.android.inputmethod.latin ]]; then
-        warn "Gboard: package APK '$pkg', bukan com.google.android.inputmethod.latin"
+    if [[ $pkg != "$GBOARD_PACKAGE" ]]; then
+        warn "Gboard: package APK '$pkg', bukan $GBOARD_PACKAGE (tetap dipasang)"
     fi
+    GBOARD_PKG_REAL=$pkg
     rm -rf "$dst"; mkdir -p "$dst"
     cp -f "$src" "$dst/$name.apk"
     chmod 0644 "$dst/$name.apk"
     # lib native diekstrak ke lib/arm64 supaya jalan walau lib di APK terkompres
-    for abi in arm64-v8a armeabi-v7a; do
-        n=$(unzip -Z1 "$src" "lib/$abi/*.so" 2>/dev/null | wc -l || true)
-        [[ $n -gt 0 ]] || continue
-        local tgt=arm64; [[ $abi == armeabi-v7a ]] && tgt=arm
-        mkdir -p "$dst/lib/$tgt"
-        unzip -q -j -o "$src" "lib/$abi/*.so" -d "$dst/lib/$tgt"
-        chmod 0644 "$dst/lib/$tgt/"*.so
-    done
+    # (pakai python zipfile: unzip keluar kode 1 pada APK yang punya blok signature v2/v3)
+    n=$(python3 - "$src" "$dst" <<'PY'
+import os, sys, zipfile
+src, dst = sys.argv[1], sys.argv[2]
+abis = {"arm64-v8a": "arm64", "armeabi-v7a": "arm"}
+n = 0
+with zipfile.ZipFile(src) as z:
+    for info in z.infolist():
+        parts = info.filename.split("/")
+        if len(parts) == 3 and parts[0] == "lib" and parts[1] in abis and parts[2].endswith(".so"):
+            out = os.path.join(dst, "lib", abis[parts[1]])
+            os.makedirs(out, exist_ok=True)
+            with open(os.path.join(out, parts[2]), "wb") as f:
+                f.write(z.read(info))
+            os.chmod(os.path.join(out, parts[2]), 0o644)
+            n += 1
+print(n)
+PY
+)
+    log "Gboard: $n library native diekstrak ke $GBOARD_DIR/lib"
     ok "Gboard: $pkg -> $GBOARD_DIR/$name.apk ($(( $(stat -c%s "$src") / 1048576 )) MB)"
 }
 
 # peringatan kalau semua keyboard terhapus (setup awal butuh keyboard untuk password Wi-Fi)
-IME_PACKAGES="com.sohu.inputmethod.sogou.xiaomi com.sohu.inputmethod.sogou com.baidu.input_mi \
+IME_PACKAGES="com.charlie.android.inputmethod.latin com.sohu.inputmethod.sogou.xiaomi com.sohu.inputmethod.sogou com.baidu.input_mi \
 com.iflytek.inputmethod.miui com.google.android.inputmethod.latin com.android.inputmethod.latin \
 com.touchtype.swiftkey com.samsung.android.honeyboard"
 check_ime_left() {
     local left
+    local gb=${GBOARD_PKG_REAL:-$GBOARD_PACKAGE}
     left=$(python3 "$SCRIPT_DIR/apk_index.py" "$P_FS" | cut -f1 | while read -r p; do
-        if in_list "$p" "$IME_PACKAGES"; then echo "$p"; fi; done | tr '\n' ' ')
+        if in_list "$p" "$IME_PACKAGES $gb"; then echo "$p"; fi; done | sort -u | tr '\n' ' ')
     if [[ -n ${left// /} ]]; then
         ok "keyboard tersisa: $left"
-        if [[ $(wc -w <<< "$left") -gt 1 ]] && in_list com.google.android.inputmethod.latin "$left"; then
+        if [[ -n $GBOARD_APK && $(wc -w <<< "$left") -gt 1 ]] && in_list "$gb" "$left"; then
             warn "masih ada keyboard sistem lain selain Gboard ($left). Default saat boot pertama bisa bukan Gboard; debloat keyboard lain supaya Gboard pasti default"
         fi
     else
