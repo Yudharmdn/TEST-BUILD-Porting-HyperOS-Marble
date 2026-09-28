@@ -75,7 +75,6 @@ DownloadProviderUi                         | aplikasi Downloads (provider tetap 
 PersonalAssistant                          | App Vault / widget kiri home
 TouchAssistant                             | Quick Ball
 CloudBackup
-CloudService                               | akun Xiaomi / Cloud
 MiCloudSync
 FindDevice                                 | Find Device
 Mirror                                     | Xiaomi screen mirroring
