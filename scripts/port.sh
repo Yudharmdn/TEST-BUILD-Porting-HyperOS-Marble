@@ -184,44 +184,16 @@ unpack_payload() { # payload dst pfx want
     rm -f "$pl"
 }
 
-# gabungkan super dari 1..n file (raw / sparse / zstd, boleh split) -> dst/super.img(.zst)
-assemble_super() { # dst_dir part...
-    local dst=$1 magic; shift
-    magic=$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')
-    log "super ditemukan: $(printf '%s ' "${@##*/}")(magic $magic)"
-    if [[ $# -eq 1 ]]; then
-        if [[ $magic == 28b52ffd ]]; then mv -f "$1" "$dst/super.img.zst"; else mv -f "$1" "$dst/super.img"; fi
-        return 0
-    fi
-    case $magic in
-        28b52ffd) cat "$@" | zstd -d -q -o "$dst/super.img" ;;
-        3aff26ed) simg2img "$@" "$dst/super.img" ;;
-        *)        cat "$@" > "$dst/super.img" ;;
-    esac
-    rm -f "$@"
-}
-
 collect_images() { # src_tree dst pfx
-    local src=$1 dst=$2 pfx=$3 dir anti f sparts=()
-    log "[$pfx] isi ROM (maks 60 file terbesar):"
-    find "$src" -type f -printf '%s %P\n' | sort -rn | head -n 60 | \
-        awk '{printf "    %10.1f MB  %s\n", $1/1048576, $2}'
-    dir=$(dirname "$(find "$src" -type f -name 'boot.img' | head -n1)")
-    [[ -d $dir && $dir != . ]] || die "[$pfx] boot.img / folder images tidak ditemukan di ROM"
-    f=$(find "$src" -maxdepth 3 -name 'flash_all*.sh' | head -n1)
+    local src=$1 dst=$2 pfx=$3 dir anti f
+    dir=$(dirname "$(find "$src" -type f \( -name 'super.img*' -o -name 'boot.img' \) | head -n1)")
+    [[ -d $dir && $dir != . ]] || die "[$pfx] folder images/ tidak ditemukan di ROM"
+    f=$(find "$src" -maxdepth 3 -name 'flash_all.sh' | head -n1)
     if [[ -n $f ]]; then
         anti=$(grep -oE 'CURRENT_ANTI_VER=[0-9]+' "$f" | head -n1 | cut -d= -f2 || true)
         if [[ -n $anti ]]; then echo "ANTI_VER=$anti" >> "$WORK/${pfx}.env"; fi
     fi
-    # super bisa bernama super.img / super.img.zst / super.zst / split .0 .1 ... di folder mana pun
-    mapfile -t sparts < <(find "$src" -type f -iname 'super*' ! -iname 'super_empty*' \
-        ! -iname '*.txt' ! -iname '*.sh' ! -iname '*.bat' ! -iname '*.md5' ! -iname '*.sha*' | sort -V)
-    if [[ ${#sparts[@]} -gt 0 ]]; then
-        assemble_super "$dst" "${sparts[@]}"
-    else
-        warn "[$pfx] tidak ada file super* di ROM"
-    fi
-    find "$dir" -maxdepth 1 -type f -name '*.img' -exec mv -t "$dst" {} +
+    find "$dir" -maxdepth 1 -type f \( -name '*.img' -o -name '*.img.zst' \) -exec mv -t "$dst" {} +
 }
 
 unpack_super() { # dst pfx  (kalau ada super.img: pecah jadi partisi logical)
@@ -351,21 +323,6 @@ repack_ext4() { # root name out_img rw(true/false)
 }
 
 # ------------------------------------------------------------------ patch: port
-# codename donor: lewati nama generik (HyperOS baru memakai "miproduct" di product)
-detect_donor() {
-    local c v hint
-    hint=${PORT_ROM%%\?*}; hint=${hint##*/}; hint=${hint%%-ota*}; hint=${hint%%_*}
-    for c in "$(get_prop "$P_FS/mi_ext/etc/build.prop" ro.product.mod_device)" \
-             "$(get_prop "$P_FS/product/etc/build.prop" ro.product.product.device)" \
-             "$(get_prop "$P_FS/product/etc/build.prop" ro.product.product.name)" \
-             "$(get_prop "$P_FS/system_ext/etc/build.prop" ro.product.system_ext.device)" \
-             "$hint"; do
-        v=${c%%_*}
-        case $v in ""|miproduct|mainline|generic|missi*|qssi*|mi_ext|xiaomi*) continue ;; esac
-        echo "$v"; return 0
-    done
-    echo ""
-}
 patch_props() {
     local donor=$1 base=$2 f model brand market dens dens2
     model=$(get_prop "$B_FS/vendor/build.prop" ro.product.vendor.model)
@@ -512,9 +469,9 @@ patch_vendor_fstab() {
     while IFS= read -r -d '' f; do
         log "fstab vendor: ${f#"$B_FS"/}"
         patch_fstab_file "$f"; found=1
-    done < <(if [[ -d $B_FS/vendor/etc ]]; then find "$B_FS/vendor/etc" -maxdepth 1 -type f -name 'fstab.*' -print0; fi)
+    done < <(find "$B_FS/vendor/etc" -maxdepth 1 -type f -name 'fstab.*' -print0 2>/dev/null)
     if [[ $found != 1 ]]; then
-        warn "fstab di vendor/etc tidak ditemukan"
+        warn "fstab di vendor/etc tidak ditemukan. Isi vendor/etc: $(find "$B_FS/vendor/etc" -maxdepth 1 -name 'fstab*' -printf '%f ' 2>/dev/null)"
     fi
 }
 
@@ -692,13 +649,7 @@ main() {
     mkdir -p "$OUT_IMG_TMP"
 
     # ---------------- 1. BASE
-    group_start "0/7 Cek input & URL"
-    if [[ $SUPER_SIZE != auto ]]; then
-        [[ $SUPER_SIZE =~ ^[0-9]+$ ]] || die "super_size harus angka byte atau 'auto', bukan '$SUPER_SIZE'"
-        if [[ $(( SUPER_SIZE % 4096 )) -ne 0 ]]; then
-            die "super_size $SUPER_SIZE bukan kelipatan 4096. Pakai 'auto', atau angka persis dari: adb shell su -c 'blockdev --getsize64 /dev/block/by-name/super'"
-        fi
-    fi
+    group_start "0/7 Cek URL"
     check_url BASE_ROM "$BASE_ROM"
     check_url PORT_ROM "$PORT_ROM"
     if [[ -n $RECOVERY_IMG ]]; then check_url RECOVERY_IMG "$RECOVERY_IMG"; fi
@@ -721,12 +672,6 @@ main() {
         logical="system system_ext product vendor odm mi_ext vendor_dlkm system_dlkm odm_dlkm"
     fi
     log "partisi logical base: $logical"
-    # tanpa vendor/odm dari base, ROM pasti tidak bisa boot -> hentikan di sini
-    for p in vendor odm; do
-        if [[ ! -f $B_IMG/$p.img ]]; then
-            die "base ROM tidak menghasilkan $p.img (super tidak ditemukan/tidak terbaca). Pakai fastboot ROM resmi marble (.tgz) atau OTA zip resmi (payload.bin). Lihat daftar 'isi ROM' di atas."
-        fi
-    done
 
     # ---------------- 2. PORT
     group_start "2/7 Port ROM (donor)"
@@ -758,7 +703,8 @@ main() {
     base_dev=$(get_prop "$B_FS/vendor/build.prop" ro.product.vendor.device)
     [[ -n $base_dev ]] || base_dev=$TARGET_DEVICE
     [[ $base_dev == "$TARGET_DEVICE" ]] || warn "base vendor device=$base_dev, bukan $TARGET_DEVICE - cek BASE_ROM!"
-    donor=$(detect_donor)
+    donor=$(get_prop "$P_FS/product/etc/build.prop" ro.product.product.device)
+    [[ -n $donor ]] || donor=$(get_prop "$P_FS/product/etc/build.prop" ro.product.product.name)
     port_ver=$(get_prop "$P_FS/mi_ext/etc/build.prop" ro.mi.os.version.incremental)
     [[ -n $port_ver ]] || port_ver=$(get_prop "$P_FS/product/etc/build.prop" ro.mi.os.version.incremental)
     [[ -n $port_ver ]] || port_ver=$(get_prop "$P_FS/system/system/build.prop" ro.build.version.incremental)
@@ -767,10 +713,7 @@ main() {
 
     # kompatibilitas: sepolicy mapping & VINTF
     local sver fcm
-    sver=""
-    if [[ -f $B_FS/vendor/etc/selinux/plat_sepolicy_vers.txt ]]; then
-        sver=$(tr -d '[:space:]' < "$B_FS/vendor/etc/selinux/plat_sepolicy_vers.txt")
-    fi
+    sver=$(tr -d '[:space:]' < "$B_FS/vendor/etc/selinux/plat_sepolicy_vers.txt" 2>/dev/null || true)
     if [[ -n $sver ]]; then
         if [[ -f $P_FS/system/system/etc/selinux/mapping/$sver.cil ]]; then ok "sepolicy mapping $sver.cil ada"
         else warn "system donor TIDAK punya selinux/mapping/$sver.cil -> kemungkinan besar bootloop"; fi
