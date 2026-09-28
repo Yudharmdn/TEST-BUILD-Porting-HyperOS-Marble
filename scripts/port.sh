@@ -1155,6 +1155,25 @@ PY
     done
 }
 
+# jaminan: META-INF cuma flash. Perintah format / wipe / hapus data dinetralkan,
+# build gagal kalau masih ada yang tersisa.
+installer_no_wipe() { # pkg
+    local pkg=$1 res fixed left line
+    python3 "$SCRIPT_DIR/installer_sanitize.py" "$pkg/META-INF" > "$WORK/installer_sanitize.log"
+    while IFS= read -r line; do
+        case $line in RESULT*) ;; *) printf '    %s\n' "$line" ;; esac
+    done < "$WORK/installer_sanitize.log"
+    res=$(sed -n 's/^RESULT //p' "$WORK/installer_sanitize.log" | tail -n1)
+    fixed=${res%% *}; left=${res##* }
+    if [[ ! ${fixed:-x} =~ ^[0-9]+$ || ! ${left:-x} =~ ^[0-9]+$ ]]; then die "installer: cek hapus-data gagal dijalankan"; fi
+    if (( left > 0 )); then die "installer: masih ada $left perintah hapus/format data di META-INF (lihat LEFT di atas)"; fi
+    if (( fixed > 0 )); then
+        ok "installer: $fixed perintah hapus/format data dinetralkan -> zip cuma flash, data tidak disentuh"
+    else
+        ok "installer: tidak ada perintah format/wipe/hapus data -> zip cuma flash, data tidak disentuh"
+    fi
+}
+
 # pakai META-INF ROM base apa adanya, lalu cek semua file yang dirujuk installer ada di paket
 apply_base_installer() { # pkg
     local pkg=$1 ref missing="" unref="" f n=0
@@ -1162,6 +1181,14 @@ apply_base_installer() { # pkg
     log "installer: META-INF dari ROM base ($( { file -b "$ub" 2>/dev/null || echo "?"; } | cut -c1-60))"
     if [[ -f $us ]] && grep -qiE 'sha1_check|sha256|apply_patch|block_image_verify' "$us"; then
         warn "updater-script base mengecek hash/patch - file yang diubah (super, boot, vbmeta) bisa ditolak installer"
+    fi
+    if [[ -f $us ]]; then
+        local other
+        other=$(grep -nvE '^[[:space:]]*(#|$)|package_extract_file|ui_print|show_progress|set_progress' "$us" || true)
+        if [[ -n $other ]]; then
+            log "installer: perintah selain flash image:"
+            while IFS= read -r f; do printf '    %s\n' "$f"; done <<< "$other"
+        fi
     fi
     # file yang dirujuk (teks updater-script + string di update-binary)
     ref=$( { [[ -f $us ]] && cat "$us"; strings -n 6 "$ub" 2>/dev/null; } \
@@ -1429,6 +1456,7 @@ main() {
         fi
         write_recovery_pkg "$pkg" "$port_ver"
     fi
+    installer_no_wipe "$pkg"
     local stamp name
     stamp=$(date +%Y%m%d)
     name="HyperOS_${port_ver}_${TARGET_DEVICE}_port_${stamp}"
