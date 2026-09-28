@@ -72,6 +72,7 @@ env:
   DISABLE_AVB: "true"
   EROFS_COMP: "lz4hc,9"
   EXT4_HEADROOM_MB: "128"
+  INSTALLER: base               # base = pakai META-INF ROM base (xiaomi.eu) | ours = installer buatan script
   RECOVERY_SUPER: raw          # raw = images/super.img | zst = images/super.img.zst (zip lebih kecil)
   # boot.img custom (kernel melt-rebase) menggantikan boot.img base; kosongkan untuk pakai boot base
   BOOT_IMG: https://github.com/Yudharmdn/boot-melt-rebase/releases/download/boot-melt-rebase/boot.img
@@ -259,3 +260,4 @@ jobs:
             echo "| Debug ADB | ${DEBUG_ADB} |"
             echo "| Format super | ${RECOVERY_SUPER} |"
           } >> "$GITHUB_STEP_SUMMARY"
+          
