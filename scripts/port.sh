@@ -28,6 +28,8 @@ DEBLOAT=${DEBLOAT:-""}
 EROFS_COMP=${EROFS_COMP:-"lz4hc,9"}
 EXT4_HEADROOM_MB=${EXT4_HEADROOM_MB:-128}
 DEBLOAT_KEEP=""
+VNDK_COMPAT=${VNDK_COMPAT:-true}           # vendor butuh VNDK APEX versi lama -> salin dari system/system_ext base
+LINKER_CHECK=${LINKER_CHECK:-true}         # laporan dependensi linker ELF vendor/odm (info)
 VINTF_COMPAT=${VINTF_COMPAT:-true}         # level FCM vendor tidak dikenal framework donor -> salin matrix dari system base
 PROP_MERGE=${PROP_MERGE:-true}             # salin props khas device dari product/etc/build.prop base
 OVERLAY_FIX=${OVERLAY_FIX:-true}           # buang overlay khas donor, salin overlay khas marble
@@ -428,6 +430,59 @@ check_vintf() {
     done
     rm -rf "$tmp"
     warn "VINTF: vendor level$missing lebih tua dari yang didukung Android donor. Matrix sudah ditambal, tapi HAL lama tetap bisa tidak dikenali framework baru - cek logcat setelah boot"
+}
+
+# ------------------------------------------------------------------ VNDK / linker
+# vendor lama (ro.vndk.version <= 34) me-link library VNDK dari APEX com.android.vndk.vNN
+# di system_ext/system. Android baru tidak lagi membawanya -> ambil dari ROM base.
+vndk_compat() {
+    local ver apexd have f tmp="$WORK/base_apex" t img sub found
+    ver=$(get_prop "$B_FS/vendor/build.prop" ro.vndk.version)
+    if [[ ! $ver =~ ^[0-9]+$ ]]; then log "VNDK: ro.vndk.version vendor '${ver:-kosong}' (tidak memakai VNDK), dilewati"; return 0; fi
+    have=$(find "$P_FS/system_ext/apex" "$P_FS/system/system/apex" -maxdepth 1 -name "com.android.vndk.v$ver.*apex" -printf '%f ' 2>/dev/null || true)
+    if [[ -n ${have// /} ]]; then ok "VNDK: vendor butuh v$ver, sudah ada di port ($have)"; return 0; fi
+    warn "VNDK: vendor butuh VNDK v$ver tapi APEX-nya tidak ada di system donor -> HAL vendor gagal load kalau tidak ditambah"
+    rm -rf "$tmp"; mkdir -p "$tmp"
+    for img in system_ext system; do
+        [[ -f $B_IMG/$img.img ]] || continue
+        if [[ $img == system ]]; then sub=system/apex; else sub=apex; fi
+        t=$(gettype -i "$B_IMG/$img.img" 2>/dev/null || true)
+        if [[ $t == erofs ]]; then
+            "${EXTRACT_EROFS:-$BIN/extract.erofs}" -i "$B_IMG/$img.img" -X "$sub" -o "$tmp/$img" >/dev/null 2>&1 \
+                || "$BIN/extract.erofs" -i "$B_IMG/$img.img" -X "$sub" -o "$tmp/$img" >/dev/null 2>&1 || true
+        else
+            python3 "$PYBIN/imgextractor/imgextractor.py" "$B_IMG/$img.img" "$tmp/$img" >/dev/null 2>&1 || true
+        fi
+    done
+    found=$(find "$tmp" -type f -name "com.android.vndk.v$ver.*apex" | head -n1)
+    if [[ -z $found ]]; then
+        warn "VNDK: com.android.vndk.v$ver tidak ada juga di ROM base -> kemungkinan besar bootloop / HAL mati"
+        rm -rf "$tmp"; return 0
+    fi
+    apexd="$P_FS/system_ext/apex"; mkdir -p "$apexd"
+    cp -f "$found" "$apexd/"; chmod 0644 "$apexd/$(basename "$found")"
+    ok "VNDK: $(basename "$found") ($(( $(stat -c%s "$found") / 1048576 )) MB) disalin dari base ke system_ext/apex"
+    rm -rf "$tmp"
+}
+
+linker_check() {
+    local args=() d
+    for d in vendor odm; do
+        if [[ -d $B_FS/$d ]]; then args+=(--check "$B_FS/$d" --apex "$B_FS/$d/apex"); fi
+    done
+    for d in "$P_FS/system/system" "$P_FS/system_ext" "$P_FS/product"; do
+        if [[ -d $d ]]; then args+=(--provide "$d"); fi
+    done
+    for d in "$P_FS/system/system/apex" "$P_FS/system_ext/apex"; do
+        if [[ -d $d ]]; then args+=(--apex "$d"); fi
+    done
+    log "linker: cek dependensi ELF vendor/odm (DT_NEEDED) ..."
+    timeout 900 python3 "$SCRIPT_DIR/linker_check.py" "${args[@]}" \
+        --erofs-extract "${EXTRACT_EROFS:-$BIN/extract.erofs}" > "$WORK/linker_check.log" 2>&1 || true
+    while IFS= read -r d; do printf '    %s\n' "$d"; done < "$WORK/linker_check.log"
+    if grep -q 'MISSING' "$WORK/linker_check.log"; then
+        warn "linker: ada library yang dibutuhkan vendor/odm tapi tidak ada di ROM (lihat daftar MISSING) -> HAL terkait bisa gagal start"
+    fi
 }
 
 # ------------------------------------------------------------------ props device
@@ -1244,6 +1299,8 @@ main() {
         else warn "system donor TIDAK punya selinux/mapping/$sver.cil -> kemungkinan besar bootloop"; fi
     fi
     check_vintf
+    if is_true "$VNDK_COMPAT"; then vndk_compat; fi
+    if is_true "$LINKER_CHECK"; then linker_check; fi
 
     DEBLOAT_KEEP=$(debloat_keep)
     if is_true "$PROP_MERGE"; then merge_device_props; fi
