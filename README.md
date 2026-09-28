@@ -16,12 +16,12 @@ In short, the ported ROM is put together from two ROMs:
 After merging them, `scripts/port.sh` patches the parts that usually stop a port from booting:
 
 - **Props:** build.prop is adjusted for marble (codename, model, density, and the audio/bluetooth/etc. props from the base).
-- **Device files:** `device_features`, `displayconfig`, the device overlays and MiuiCamera are taken from marble, not the donor.
-- **VINTF:** the marble vendor is level 6 (Android 12), which Android 17 no longer knows about. The script copies `compatibility_matrix.6.xml` from the base and checks both directions to make sure everything the vendor asks for exists in the framework.
-- **VNDK:** the VNDK v32 APEX is copied from the base, since newer Android donors don't ship it anymore.
+- **Device files:** `device_features`, `displayconfig`, the device overlays and MiuiCamera are taken from marble, not the donor. The camera's privileged-permission allowlist from marble is copied along with it, otherwise system_server can refuse to boot.
+- **VINTF:** the marble vendor is FCM level 6 (Android 12), which Android 17 no longer knows about. The script copies `compatibility_matrix.6.xml` from the base system into `/system/etc/vintf/` of the port (that's the framework side, the VINTF files in `/vendor` and `/odm` are left untouched). It also checks the other direction, making sure everything the vendor's matrix asks for is provided by the framework.
+- **VNDK:** the VNDK v32 APEX is copied from the base into `/system_ext/apex`, and `vendor-ndk 32` is declared in a framework manifest fragment, since newer Android donors don't ship either anymore.
 - **Linker:** every library the vendor/odm binaries need is checked one by one, and the result shows up in the log.
 - **fstab and vbmeta:** `/data` encryption is removed, vendor/odm can be mounted rw, and verity is disabled.
-- **Keyboard:** Gboard is installed and set as the default keyboard. The Chinese keyboards (Sogou, Baidu, iFlytek) are removed.
+- **Keyboard:** Gboard is added as a system app, and the Chinese keyboards (Sogou, Baidu, iFlytek) are removed. With no other keyboard left, Gboard becomes the default on its own.
 - **Debloat:** unneeded apps are removed based on `debloat_packages.txt`.
 - **boot.img:** replaced with a custom kernel (melt).
 
@@ -51,7 +51,7 @@ A few things are done this way on purpose:
 
 | Input | What to put there |
 |---|---|
-| `base_rom_url` | link to the xiaomi.eu marble zip (sourceforge) |
+| `base_rom_url` | link to the xiaomi.eu marble zip (sourceforge). It has to be the recovery zip, since its META-INF is reused as the installer |
 | `port_rom_url` | link to the donor's full OTA zip (the one with `payload.bin` inside) |
 | `super_size` | `9663676416` (marble's super size, leave it as is) |
 | `ext4_partitions` | `vendor odm`, so they can be edited directly on the phone |
@@ -117,7 +117,7 @@ If there's anything else you want forced to the marble version, just drop it in 
 
 ## If it bootloops
 
-Since `debug_adb` is on, you can pull logs even while the phone is stuck on the boot logo:
+With `debug_adb` on, adb starts early in boot, so in most cases you can pull logs even while the phone is stuck on the boot animation:
 
 ```
 adb wait-for-device logcat -b all > boot.log
@@ -130,7 +130,7 @@ Things worth searching for:
 grep -iE "FATAL|vintf|avc: denied|init: .*failed|hidl|aidl" boot.log
 ```
 
-If the phone rebooted on its own, also check `/sys/fs/pstore/` from OrangeFox. The kernel log from the previous boot usually ends up there.
+If the phone keeps rebooting by itself, boot into OrangeFox and look in `/sys/fs/pstore/`. If the kernel has pstore enabled, the log from the previous boot ends up there.
 
 ## Repo layout
 
