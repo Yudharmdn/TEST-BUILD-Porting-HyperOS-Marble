@@ -26,6 +26,12 @@ com.google.android.marvin.talkback            | TalkBack
 com.google.android.printservice.recommendation | Mobile Printing
 com.google.ar.lens                            | AR Lens
 
+# ---- Xiaomi Cloud (akun Xiaomi / Find Device ikut terdampak)
+com.miui.cloudbackup                          | Xiaomi Cloud backup
+com.xiaomi.micloud.sdk                        | Xiaomi Cloud SDK
+com.miui.micloudsync                          | Xiaomi Cloud sync
+com.miui.cloudservice                         | Xiaomi Cloud service
+
 # ---- Xiaomi apps
 com.miui.player                               | Mi Music
 com.mi.global.shop                            | Mi Store
@@ -93,3 +99,20 @@ SoundRecorder
 AiAsstVision
 MiuiAudioMonitor
 NQNfcNci                                   | NFC (NFC HP jadi mati)
+
+# ============================================================================
+# Path (ada '/') - relatif ke root partisi port, dihapus persis.
+# ============================================================================
+product/data-app/MiuiScanner                 | Scanner
+product/app/SogouIME                         | keyboard Sogou
+product/data-app/BaiduIME                    | keyboard Baidu
+product/priv-app/MIUIFindDeviceCN            | Find Device CN
+product/data-app/MIUIYoupin                  | Youpin
+product/app/MiLinkOS4Cn                      | HyperConnect / cast CN
+product/data-app/MIpay                       | Mi Pay
+product/data-app/MIUIMusicT                  | Music
+product/priv-app/NewCall                     | fitur panggilan video operator CN
+product/data-app/MiShop                      | Mi Shop
+product/priv-app/MIUIBrowser                 | browser bawaan
+product/priv-app/VoiceAssistAndroidT         | XiaoAi / asisten suara
+product/app/WinPlay                          | interkoneksi PC
