@@ -25,6 +25,8 @@ import zipfile
 from collections import defaultdict
 
 PT_LOAD, PT_DYNAMIC = 1, 2
+EM_QDSP6 = 164          # Hexagon DSP (adsp/cdsp/HTP skel): dimuat di DSP, bukan oleh linker Android
+DSP_SKIPPED = [0]
 DT_NULL, DT_NEEDED, DT_STRTAB = 0, 1, 5
 
 
@@ -39,6 +41,10 @@ def elf_needed(path):
             if data != 1:  # hanya little-endian
                 return None
             e = "<"
+            f.seek(18)
+            if struct.unpack(e + "H", f.read(2))[0] == EM_QDSP6:
+                DSP_SKIPPED[0] += 1
+                return None
             if cls == 2:
                 f.seek(0x20); phoff = struct.unpack(e + "Q", f.read(8))[0]
                 f.seek(0x36); phentsize, phnum = struct.unpack(e + "HH", f.read(4))
@@ -191,8 +197,8 @@ def main():
                     if n not in have:
                         missing[bits][n].append(os.path.relpath(p, os.path.dirname(d)))
 
-    print("ELF diperiksa: %d | library tersedia: %d (64-bit) %d (32-bit) | APEX dibaca: %d"
-          % (scanned, len(lib64), len(lib32), len(apexes)))
+    print("ELF diperiksa: %d (+%d ELF DSP Hexagon dilewati) | library tersedia: %d (64-bit) %d (32-bit) | APEX dibaca: %d"
+          % (scanned, DSP_SKIPPED[0], len(lib64), len(lib32), len(apexes)))
     for bits in (64, 32):
         items = sorted(missing[bits].items(), key=lambda kv: -len(kv[1]))
         if not items:
