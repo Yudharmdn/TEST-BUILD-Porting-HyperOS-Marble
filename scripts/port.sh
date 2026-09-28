@@ -31,11 +31,13 @@ RECOVERY_SUPER=${RECOVERY_SUPER:-raw}      # raw = images/super.img | zst = imag
 RECOVERY_IMG=${RECOVERY_IMG:-}              # opsional: URL/path recovery.img custom (OrangeFox dll)
 ZIP_LEVEL=${ZIP_LEVEL:-1}
 KEEP_DOWNLOADS=${KEEP_DOWNLOADS:-false}
+EXTRACT_EROFS=${EXTRACT_EROFS:-}           # opsional: extract.erofs versi baru (dicoba duluan)
 WORK=${WORK:-$PWD/work}
 OUT=${OUT:-$PWD/out}
 
 FIXED_TS=1230768000
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+DEVICE_FILES_DIR=${DEVICE_FILES_DIR:-$SCRIPT_DIR/../devices/$TARGET_DEVICE}
 BIN="$TOOLS_DIR/bin/Linux/x86_64"
 PYBIN="$TOOLS_DIR/bin"
 export PATH="$BIN:$PATH"
@@ -218,17 +220,59 @@ unpack_super() { # dst pfx  (kalau ada super.img: pecah jadi partisi logical)
 }
 
 # ------------------------------------------------------------------ fs extract / repack
+sanity_file() { # partisi -> file yang wajib ada setelah ekstrak
+    case $1 in
+        system) echo system/build.prop ;;
+        vendor) echo build.prop ;;
+        product|system_ext|mi_ext) echo etc/build.prop ;;
+        *) echo "" ;;
+    esac
+}
+
+verify_extract() { # root name -> 0 kalau lengkap
+    local root=$1 name=$2 cfg exp got key
+    cfg="$root/config/${name}_fs_config"
+    [[ -d $root/$name && -s $cfg ]] || { warn "$name: folder/config hasil ekstrak tidak ada"; return 1; }
+    exp=$(wc -l < "$cfg")
+    got=$(find "$root/$name" | wc -l)
+    log "  $name: $got file/folder, fs_config $exp entri"
+    key=$(sanity_file "$name")
+    if [[ -n $key && ! -e $root/$name/$key ]]; then
+        warn "$name: $key tidak ada setelah ekstrak"; return 1
+    fi
+    # fs_config punya entri sintetis ("/", lost+found) -> toleransi 2 + 3%
+    if [[ $(( exp - got )) -gt $(( 2 + exp * 3 / 100 )) ]]; then
+        warn "$name: ekstrak tidak lengkap ($got dari $exp)"; return 1
+    fi
+    return 0
+}
+
 extract_img() { # img out_root
-    local img=$1 root=$2 t
-    python3 "$SCRIPT_DIR/lp_tool.py" sparse "$img" && { simg2img "$img" "$img.raw"; mv -f "$img.raw" "$img"; }
+    local img=$1 root=$2 t name lg thr tl ok=0 tools=()
+    name=$(basename "$img" .img)
+    lg="$WORK/extract_$name.log"
+    if python3 "$SCRIPT_DIR/lp_tool.py" sparse "$img"; then simg2img "$img" "$img.raw"; mv -f "$img.raw" "$img"; fi
     t=$(gettype -i "$img" 2>/dev/null || true)
     mkdir -p "$root"
     case $t in
-        erofs) extract.erofs -x -i "$img" -o "$root" -T"$(nproc)" >/dev/null ;;
-        ext)   python3 "$PYBIN/imgextractor/imgextractor.py" "$img" "$root" >/dev/null ;;
-        *)     die "tipe fs tidak dikenal untuk $(basename "$img"): '$t'" ;;
+        erofs)
+            thr=$(nproc); if [[ $thr -gt 4 ]]; then thr=4; fi
+            if [[ -n ${EXTRACT_EROFS:-} ]]; then tools+=("$EXTRACT_EROFS"); fi
+            tools+=("$BIN/extract.erofs")
+            for tl in "${tools[@]}"; do
+                rm -rf "${root:?}/$name" "$root/config/${name}_"*
+                if "$tl" -x -i "$img" -o "$root" -T"$thr" > "$lg" 2>&1 && verify_extract "$root" "$name"; then
+                    ok=1; log "  $name diekstrak dengan $tl"; break
+                fi
+                warn "$name: extractor $tl gagal/tidak lengkap, log:"
+                tail -n 15 "$lg" >&2
+            done ;;
+        ext)
+            python3 "$PYBIN/imgextractor/imgextractor.py" "$img" "$root" > "$lg" 2>&1 || true
+            if verify_extract "$root" "$name"; then ok=1; else tail -n 15 "$lg" >&2; fi ;;
+        *)  die "tipe fs tidak dikenal untuk $name.img: '$t'" ;;
     esac
-    [[ -d $root/$(basename "$img" .img) ]] || die "ekstrak $(basename "$img") gagal"
+    [[ $ok == 1 ]] || die "ekstrak $name.img gagal/tidak lengkap (tipe $t). Lihat log di atas."
 }
 
 prep_config() { # root name
@@ -318,39 +362,63 @@ patch_props() {
     fi
 }
 
-replace_dir() { # rel_path (relatif ke root fs, mis. product/etc/displayconfig)
-    local rel=$1
-    if [[ -e $B_FS/$rel ]]; then
-        rm -rf "${P_FS:?}/$rel"
-        mkdir -p "$(dirname "$P_FS/$rel")"
-        cp -a "$B_FS/$rel" "$P_FS/$rel"
-        ok "ganti dari base: $rel"
+first_existing() { # root rel... -> rel pertama yang ada
+    local root=$1 r; shift
+    for r in "$@"; do
+        if [[ -e $root/$r ]]; then echo "$r"; return 0; fi
+    done
+    return 1
+}
+
+# res_from_base <label> <rel di product port> <kandidat lokasi di base...>
+#   base punya di product  -> ganti punya donor dengan punya base
+#   base punya di vendor/odm -> hapus punya donor di product (supaya vendor/odm marble yang dibaca)
+#   base tidak punya       -> punya donor dipertahankan + warning
+res_from_base() {
+    local label=$1 dst=$2 src; shift 2
+    if ! src=$(first_existing "$B_FS" "$@"); then
+        warn "$label: tidak ada di base ($*), punya donor dipertahankan. Bisa diisi lewat devices/$TARGET_DEVICE/$dst"
+        return 0
+    fi
+    if [[ $src == product/* ]]; then
+        rm -rf "${P_FS:?}/$dst"
+        mkdir -p "$(dirname "$P_FS/$dst")"
+        cp -a "$B_FS/$src" "$P_FS/$dst"
+        ok "$label: dari base $src"
     else
-        warn "base tidak punya $rel, dilewati"
+        if [[ -e $P_FS/$dst ]]; then rm -rf "${P_FS:?}/$dst"; fi
+        ok "$label: marble memakai $src (base), punya donor di $dst dihapus"
     fi
 }
 
 patch_port_resources() {
-    local item f
+    local item f src
     for item in $REPLACE_FROM_BASE; do
         case $item in
             device_features)
-                if [[ -d $B_FS/product/etc/device_features ]]; then
-                    rm -rf "$P_FS/product/etc/device_features"
-                    cp -a "$B_FS/product/etc/device_features" "$P_FS/product/etc/device_features"
-                    ok "device_features dari base: $(find "$P_FS/product/etc/device_features" -maxdepth 1 -type f -printf '%f ')"
-                else
-                    warn "base tidak punya product/etc/device_features"
-                fi ;;
-            displayconfig) replace_dir product/etc/displayconfig ;;
+                res_from_base device_features product/etc/device_features \
+                    product/etc/device_features vendor/etc/device_features odm/etc/device_features ;;
+            displayconfig)
+                res_from_base displayconfig product/etc/displayconfig \
+                    product/etc/displayconfig vendor/etc/displayconfig odm/etc/displayconfig ;;
             overlay)
                 for f in DevicesOverlay DevicesAndroidOverlay; do
                     if [[ -f $B_FS/product/overlay/$f.apk ]]; then
                         cp -a "$B_FS/product/overlay/$f.apk" "$P_FS/product/overlay/$f.apk"
                         ok "overlay dari base: $f.apk"
+                    else
+                        warn "overlay: base tidak punya product/overlay/$f.apk"
                     fi
                 done ;;
-            camera) replace_dir product/priv-app/MiuiCamera ;;
+            camera)
+                if src=$(first_existing "$B_FS" product/priv-app/MiuiCamera product/app/MiuiCamera product/data-app/MiuiCamera); then
+                    rm -rf "$P_FS"/product/priv-app/MiuiCamera "$P_FS"/product/app/MiuiCamera "$P_FS"/product/data-app/MiuiCamera
+                    mkdir -p "$P_FS/$(dirname "$src")"
+                    cp -a "$B_FS/$src" "$P_FS/$src"
+                    ok "camera: MiuiCamera dari base $src"
+                else
+                    warn "camera: base tidak punya MiuiCamera, kamera donor dipakai. Kalau crash isi devices/$TARGET_DEVICE/product/priv-app/MiuiCamera"
+                fi ;;
             *) warn "REPLACE_FROM_BASE: item tidak dikenal '$item'" ;;
         esac
     done
@@ -359,6 +427,25 @@ patch_port_resources() {
         item=${item#/}
         if [[ -e $P_FS/$item ]]; then rm -rf "${P_FS:?}/$item"; ok "debloat: $item"
         else warn "debloat: $item tidak ada"; fi
+    done
+}
+
+# file tambahan dari repo: devices/<device>/<partisi>/... ditimpa ke hasil ekstrak
+apply_device_files() {
+    local dir=$DEVICE_FILES_DIR part root n
+    if [[ ! -d $dir ]]; then log "devices: $dir tidak ada, dilewati"; return 0; fi
+    for part in system system_ext product mi_ext vendor odm; do
+        [[ -d $dir/$part ]] || continue
+        case $part in vendor|odm) root=$B_FS ;; *) root=$P_FS ;; esac
+        if [[ ! -d $root/$part ]]; then warn "devices: $part tidak diekstrak, $dir/$part dilewati"; continue; fi
+        n=$(find "$dir/$part" -type f ! -name '.gitkeep' ! -name 'README*' | wc -l)
+        [[ $n -gt 0 ]] || continue
+        (cd "$dir/$part" && find . -type f ! -name '.gitkeep' ! -name 'README*' -print0 | \
+            while IFS= read -r -d '' f; do
+                mkdir -p "$root/$part/$(dirname "$f")"
+                cp -f "$f" "$root/$part/$f"
+            done)
+        ok "devices: $n file ditimpa ke $part"
     done
 }
 
@@ -383,7 +470,9 @@ patch_vendor_fstab() {
         log "fstab vendor: ${f#"$B_FS"/}"
         patch_fstab_file "$f"; found=1
     done < <(find "$B_FS/vendor/etc" -maxdepth 1 -type f -name 'fstab.*' -print0 2>/dev/null)
-    [[ $found == 1 ]] || warn "fstab di vendor/etc tidak ditemukan"
+    if [[ $found != 1 ]]; then
+        warn "fstab di vendor/etc tidak ditemukan. Isi vendor/etc: $(find "$B_FS/vendor/etc" -maxdepth 1 -name 'fstab*' -printf '%f ' 2>/dev/null)"
+    fi
 }
 
 patch_vendor_boot() {
@@ -637,6 +726,7 @@ main() {
 
     patch_props "$donor" "$base_dev"
     patch_port_resources
+    apply_device_files
     rm -rf "${B_FS:?}/product" "$B_FS/config/product_"*
     rm -f "$B_IMG/product.img"
     patch_vendor_fstab
