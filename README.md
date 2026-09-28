@@ -1,2 +1,161 @@
-# TEST-BUILD-Porting-HyperOS-Marble
-Porting Rom HyperOS Marble
+# HyperOS Port for POCO F5 (marble)
+
+This repo is a GitHub Actions workflow that quick-ports HyperOS from other Xiaomi phones to the POCO F5 (marble). Everything runs on GitHub's runners, so you don't need a beefy PC or a Linux box at home. You paste the ROM links, hit Run, wait about 20 minutes, and download the zip.
+
+The output is a zip you can install straight from OrangeFox. Its contents and layout follow the xiaomi.eu ROM on purpose.
+
+> **This is still a TEST build.** The workflow runs and the zip gets built, but porting across Android versions always carries a risk of bootloops or broken features. Back up anything important first, and make sure you know how to get back to your previous ROM.
+
+## How it works
+
+In short, the ported ROM is put together from two ROMs:
+
+- **Base (marble):** the xiaomi.eu marble ROM. Everything tied to the hardware comes from here: firmware, `vendor`, `odm`, `vendor_dlkm`, `vendor_boot`, `dtbo`.
+- **Donor:** HyperOS from another phone, e.g. the REDMI K90 (annibale) on Android 17. The UI and the system come from here: `system`, `system_ext`, `product`, `mi_ext`.
+
+After merging them, `scripts/port.sh` patches the parts that usually stop a port from booting:
+
+- **Props:** build.prop is adjusted for marble (codename, model, density, and the audio/bluetooth/etc. props from the base).
+- **Device files:** `device_features`, `displayconfig`, the device overlays and MiuiCamera are taken from marble, not the donor.
+- **VINTF:** the marble vendor is level 6 (Android 12), which Android 17 no longer knows about. The script copies `compatibility_matrix.6.xml` from the base and checks both directions to make sure everything the vendor asks for exists in the framework.
+- **VNDK:** the VNDK v32 APEX is copied from the base, since newer Android donors don't ship it anymore.
+- **Linker:** every library the vendor/odm binaries need is checked one by one, and the result shows up in the log.
+- **fstab and vbmeta:** `/data` encryption is removed, vendor/odm can be mounted rw, and verity is disabled.
+- **Keyboard:** Gboard is installed and set as the default keyboard. The Chinese keyboards (Sogou, Baidu, iFlytek) are removed.
+- **Debloat:** unneeded apps are removed based on `debloat_packages.txt`.
+- **boot.img:** replaced with a custom kernel (melt).
+
+## What's inside the zip
+
+```
+META-INF/                 installer from xiaomi.eu
+images/abl.img ... xbl_ramdump.img   marble firmware
+images/boot.img           custom kernel
+images/vendor_boot.img    patched (fstab)
+images/dtbo.img
+images/vbmeta.img, vbmeta_system.img
+images/cust.img
+images/super.img.0 ... super.img.8   super partition split into 9 chunks
+```
+
+A few things are done this way on purpose:
+
+- **recovery.img is not included**, so the OrangeFox on your phone stays untouched.
+- **The installer only flashes.** Any format or wipe command in META-INF is neutralized during the build, and if one somehow slips through, the build fails on purpose.
+
+## Building
+
+1. Fork or clone this repo.
+2. Open the **Actions** tab, pick **Port HyperOS -> marble (Recovery)**, and click **Run workflow**.
+3. Fill in the inputs:
+
+| Input | What to put there |
+|---|---|
+| `base_rom_url` | link to the xiaomi.eu marble zip (sourceforge) |
+| `port_rom_url` | link to the donor's full OTA zip (the one with `payload.bin` inside) |
+| `super_size` | `9663676416` (marble's super size, leave it as is) |
+| `ext4_partitions` | `vendor odm`, so they can be edited directly on the phone |
+| `debloat` | extra paths to remove, space separated. Can be left empty |
+| `disable_encryption` | leave it `true` |
+| `rw_mount` | leave it `true` |
+| `debug_adb` | `true` while testing (adb is on from boot, handy for logcat). Turn it off once things are stable |
+| `recovery_img_url` | leave it empty |
+| `release_repo` | empty = output goes to Artifacts. Set it to `owner/repo` to upload to a Release instead (needs the `RELEASE_TOKEN` secret) |
+
+4. Wait for it to finish, then grab the zip from the **Artifacts** section of the run page. Artifacts are kept for 7 days.
+
+If the build fails, open the **Port ROM** step in the log. Every stage has a header (0/7 through 7/7), and the `[warn]` or `[fail]` lines usually point right at the problem.
+
+### Does it work with an Android 16 donor?
+
+Yes. The script isn't tied to Android 17. All the checks (VINTF, VNDK, linker) adapt to whatever is in the donor ROM.
+
+## Flashing
+
+1. Boot into OrangeFox.
+2. Install the zip.
+3. **Format Data** (Wipe → Format Data → type `yes`). This is required on a first install, because encryption is disabled and the Android version is different. Skip it and you will almost certainly bootloop.
+4. Reboot to System. The first boot takes a while, up to 10 minutes, so be patient.
+
+Updating later to a newer build made with the same settings usually doesn't need another format.
+
+## After installing, keep in mind
+
+Some apps are removed through `debloat_packages.txt`, so a few things are on you:
+
+- **Browser:** there is none (MIUIBrowser is removed and the Chinese donor ROM doesn't ship Chrome). Have a Chrome or other browser APK ready.
+- **NFC:** disabled (`NQNfcNci` is removed). If you need NFC, delete that line from `debloat_packages.txt` and rebuild.
+- **Other things that are gone:** Print, SIM Toolkit, the QR Scanner, Find Device, and Joyose (game profiles).
+
+## Tweaking the debloat list
+
+Everything lives in `debloat_packages.txt`, and the format is relaxed:
+
+```
+com.miui.notes                 # remove by package name
+MiuiCompass                    # or by APK folder name
+product/app/SogouIME           # or by full path
+!product/priv-app/MiuiCamera   # a leading ! means never remove this
+```
+
+A couple of rules:
+
+- **Missing packages:** anything that isn't in the ROM is just skipped, and the build doesn't fail.
+- **Important apps:** SystemUI, Settings, the launcher, Security, GMS, WebView and similar are protected by the script, so even if one ends up on the list by accident it won't be removed.
+
+## marble-specific files
+
+The `devices/marble/` folder holds files that get copied over the ROM before it's packed, so it keeps matching the marble hardware:
+
+```
+devices/marble/product/etc/device_features/   marble.xml, marblein.xml
+devices/marble/product/etc/displayconfig/     display & brightness config
+devices/marble/product/overlay/               DevicesOverlay.apk, DevicesAndroidOverlay.apk
+```
+
+If there's anything else you want forced to the marble version, just drop it in here using the same folder structure as in the ROM.
+
+## If it bootloops
+
+Since `debug_adb` is on, you can pull logs even while the phone is stuck on the boot logo:
+
+```
+adb wait-for-device logcat -b all > boot.log
+adb shell dmesg > dmesg.log
+```
+
+Things worth searching for:
+
+```
+grep -iE "FATAL|vintf|avc: denied|init: .*failed|hidl|aidl" boot.log
+```
+
+If the phone rebooted on its own, also check `/sys/fs/pstore/` from OrangeFox. The kernel log from the previous boot usually ends up there.
+
+## Repo layout
+
+```
+.github/workflows/port-hyperos.yml   the main workflow
+scripts/port.sh                      the whole porting process lives here
+scripts/lp_tool.py                   reads super & payload.bin metadata
+scripts/fstab_patch.py               patches fstab
+scripts/prop_merge.py                merges marble props into the port
+scripts/vintf_check.py               checks VINTF, vendor vs framework
+scripts/linker_check.py              checks the libraries vendor needs
+scripts/installer_sanitize.py        makes sure the installer never wipes data
+scripts/sparse_split.py              splits super into super.img.0..8
+scripts/apk_index.py                 reads package names from APKs
+scripts/update-binary.in             fallback installer (when not using the base META-INF)
+debloat_packages.txt                 the debloat list
+devices/marble/                      marble-specific files
+```
+
+## Credits
+
+- [toraidl/hyperos_port](https://github.com/toraidl/hyperos_port), the porting toolkit and reference used here
+- [sekaiacg/erofs-utils](https://github.com/sekaiacg/erofs-utils) for extract.erofs
+- xiaomi.eu for the marble base ROM
+
+---
+
+Use at your own risk. If your phone bootloops, don't panic: you can always go back through OrangeFox or the official fastboot ROM.
