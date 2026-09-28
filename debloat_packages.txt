@@ -1,0 +1,95 @@
+# debloat_packages.txt - aplikasi yang dihapus dari ROM port.
+# Boleh nama package (com.miui.notes) atau nama folder APK (MiuiCompass).
+# Format bebas: satu per baris / dipisah koma. Teks setelah '|' atau '#' diabaikan.
+# Package yang tidak ada di ROM dilewati, build TIDAK dibatalkan.
+# Aplikasi penting (SystemUI, Settings, home, SecurityCenter, GMS, WebView, ...) dilindungi.
+# Hapus/beri '#' di depan baris untuk membatalkan debloat package itu.
+
+# ---- Android / AOSP
+com.android.bips                              | Default Printing Service
+com.android.bookmarkprovider                  | Bookmark Provider
+com.android.cellbroadcastreceiver             | Emergency alerts
+com.android.cellbroadcastreceiver.overlay.common
+com.android.emergency                         | SOS Calling
+com.android.printspooler                      | Printing service
+com.android.statementservice                  | Checks APK files (verifikasi app link)
+com.android.stk                               | SIM Tool-kit
+
+# ---- Google
+com.google.android.apps.tachyon               | Google Meet
+com.google.android.apps.subscriptions.red     | Google One
+com.google.android.as.oss                     | Private Compute Services
+com.google.android.apps.docs                  | Google Docs
+com.google.android.apps.wellbeing             | Digital Wellbeing
+com.google.android.feedback                   | Feedback app
+com.google.android.marvin.talkback            | TalkBack
+com.google.android.printservice.recommendation | Mobile Printing
+com.google.ar.lens                            | AR Lens
+
+# ---- Xiaomi apps
+com.miui.player                               | Mi Music
+com.mi.global.shop                            | Mi Store
+com.miui.yellowpage                           | Yellow pages
+com.miui.miservice                            | Services & Feedback
+com.miui.accessibility                        | Mi Ditto
+cn.wps.xiaomi.abroad.lite                     | WPS reader
+com.mi.globalminusscreen                      | App Vault
+com.mi.globalbrowser                          | Mi Browser (global)
+com.mi.health                                 | Mi Health
+com.mi.webkit.core                            | Mi Webkit
+com.mipay.wallet.id                           | Mi Wallet
+com.miui.analytics                            | Analytics / telemetry
+com.miui.android.fashiongallery               | Wallpaper Carousel
+com.miui.bugreport                            | Bug report
+com.miui.compass                              | Compass
+com.miui.mishare.connectivity                 | Mi Share
+com.miui.msa.global                           | MSA (iklan)
+com.miui.notes                                | Notes
+com.xiaomi.joyose                             | Joyose (profil performa/thermal game)
+com.xiaomi.midrop                             | Mi Drop / ShareMe
+com.xiaomi.scanner                            | Scanner
+
+# ---- Facebook
+com.facebook.appmanager                       | Facebook App Manager
+com.facebook.services                         | Facebook Services
+com.facebook.system                           | Facebook App Installer
+
+# ============================================================================
+# Nama folder APK (tanpa titik) - dicari di app/, priv-app/, data-app/
+# semua partisi port (system, system_ext, product, mi_ext).
+# ============================================================================
+
+# ---- Android / Google
+AdServices
+HealthConnectController
+AndroidAutoStub
+BuiltInPrintService
+PrintSpooler
+GooglePrintRecommendationService
+HotwordEnrollmentYGoogleHEXAGON_WIDEBAND   | "Hey Google" hotword
+HotwordEnrollmentXGoogleHEXAGON_WIDEBAND   | "Hey Google" hotword
+MusicFX                                    | panel efek audio
+DownloadProviderUi                         | aplikasi Downloads (provider tetap ada)
+
+# ---- Xiaomi
+PersonalAssistant                          | App Vault / widget kiri home
+TouchAssistant                             | Quick Ball
+CloudBackup
+CloudService                               | akun Xiaomi / Cloud
+MiCloudSync
+FindDevice                                 | Find Device
+Mirror                                     | Xiaomi screen mirroring
+MiLinkService                              | HyperConnect / cast
+MiConnectService                           | HyperConnect
+LinkToWindows
+MiShare                                    | Mi Share / Quick Share
+MiMover                                    | Mi Mover
+MiService                                  | Services & Feedback
+MiuiBugReport
+MiuiCompass
+MiGalleryLockscreen                        | Wallpaper Carousel
+MiuiScanner
+SoundRecorder
+AiAsstVision
+MiuiAudioMonitor
+NQNfcNci                                   | NFC (NFC HP jadi mati)
