@@ -4,6 +4,7 @@
 # Package yang tidak ada di ROM dilewati, build TIDAK dibatalkan.
 # Aplikasi penting (SystemUI, Settings, home, SecurityCenter, GMS, WebView, ...) dilindungi.
 # Hapus/beri '#' di depan baris untuk membatalkan debloat package itu.
+# Awali dengan '!' untuk MEMPERTAHANKAN (tidak pernah dihapus, mengalahkan daftar di atas).
 
 # ---- Android / AOSP
 com.android.bips                              | Default Printing Service
@@ -37,7 +38,6 @@ com.miui.player                               | Mi Music
 com.mi.global.shop                            | Mi Store
 com.miui.yellowpage                           | Yellow pages
 com.miui.miservice                            | Services & Feedback
-com.miui.accessibility                        | Mi Ditto
 cn.wps.xiaomi.abroad.lite                     | WPS reader
 com.mi.globalminusscreen                      | App Vault
 com.mi.globalbrowser                          | Mi Browser (global)
@@ -116,3 +116,18 @@ product/data-app/MiShop                      | Mi Shop
 product/priv-app/MIUIBrowser                 | browser bawaan
 product/priv-app/VoiceAssistAndroidT         | XiaoAi / asisten suara
 product/app/WinPlay                          | interkoneksi PC
+
+# ============================================================================
+# KEEP - tidak pernah dihapus (awalan '!'). Mengalahkan semua daftar di atas.
+# Selain ini, script juga punya proteksi bawaan: SystemUI, Settings, MiuiHome,
+# SecurityCenter, GMS, Play Store, WebView, PermissionController, telephony, dll.
+# ============================================================================
+!product/app/WebViewGoogle64                 | WebView
+!product/priv-app/MiuiCamera                 | kamera
+!system_ext/priv-app/Settings                | Settings
+!product/data-app/MIUIGallery                | Galeri
+!product/priv-app/MIUISecurityCenter         | Security
+!product/priv-app/MIUIAICR                   | AI (pengenalan teks/gambar)
+!product/data-app/MiMediaEditor              | editor foto/video Galeri
+!product/priv-app/MIUIAccessibility          | aksesibilitas
+!com.miui.accessibility                      | aksesibilitas
