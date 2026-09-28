@@ -87,7 +87,7 @@ jobs:
       - name: Kosongkan disk runner
         uses: jlumbroso/free-disk-space@v2
         with:
-          tool-cache: true
+          preinstalled-runtimes: true
           android: true
           dotnet: true
           haskell: true
@@ -116,6 +116,34 @@ jobs:
           git checkout -q FETCH_HEAD
           chmod +x bin/Linux/x86_64/*
           echo "TOOLS_DIR=$PWD" >> "$GITHUB_ENV"
+
+      - name: Ambil extract.erofs terbaru (sekaiacg)
+        # ROM HyperOS baru bisa pakai fitur EROFS yang belum dikenal extract.erofs lama di toolkit.
+        # Kalau step ini gagal, port.sh otomatis pakai extract.erofs toolkit.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo=sekaiacg/erofs-utils
+          asset=$(gh release view -R "$repo" --json assets -q '.assets[].name' \
+                  | grep -iE 'linux' | grep -iE 'x86_64|amd64' | head -n1)
+          [ -n "$asset" ] || { echo "asset Linux x86_64 tidak ditemukan"; exit 1; }
+          echo "asset: $asset"
+          mkdir -p erofs-new && cd erofs-new
+          gh release download -R "$repo" -p "$asset"
+          case "$asset" in
+            *.zip) unzip -q -o "$asset" ;;
+            *.tar.gz|*.tgz) tar -xzf "$asset" ;;
+            *.tar.xz) tar -xJf "$asset" ;;
+          esac
+          bin=$(find "$PWD" -type f -name extract.erofs | head -n1)
+          [ -n "$bin" ] || { echo "extract.erofs tidak ada di $asset"; exit 1; }
+          chmod +x "$bin"
+          rc=0; "$bin" -V > ver.txt 2>&1 || rc=$?
+          head -n 3 ver.txt
+          [ "$rc" -lt 126 ] || { echo "extract.erofs tidak bisa dijalankan (rc=$rc)"; exit 1; }
+          echo "EXTRACT_EROFS=$bin" >> "$GITHUB_ENV"
 
       - name: Pilih lokasi kerja (disk paling lega)
         run: |
