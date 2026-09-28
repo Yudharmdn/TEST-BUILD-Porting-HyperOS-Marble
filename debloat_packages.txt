@@ -13,7 +13,6 @@ com.android.cellbroadcastreceiver             | Emergency alerts
 com.android.cellbroadcastreceiver.overlay.common
 com.android.emergency                         | SOS Calling
 com.android.printspooler                      | Printing service
-com.android.statementservice                  | Checks APK files (verifikasi app link)
 com.android.stk                               | SIM Tool-kit
 
 # ---- Google
