@@ -440,7 +440,7 @@ vndk_compat() {
     ver=$(get_prop "$B_FS/vendor/build.prop" ro.vndk.version)
     if [[ ! $ver =~ ^[0-9]+$ ]]; then log "VNDK: ro.vndk.version vendor '${ver:-kosong}' (tidak memakai VNDK), dilewati"; return 0; fi
     have=$(find "$P_FS/system_ext/apex" "$P_FS/system/system/apex" -maxdepth 1 -name "com.android.vndk.v$ver.*apex" -printf '%f ' 2>/dev/null || true)
-    if [[ -n ${have// /} ]]; then ok "VNDK: vendor butuh v$ver, sudah ada di port ($have)"; return 0; fi
+    if [[ -n ${have// /} ]]; then ok "VNDK: vendor butuh v$ver, sudah ada di port ($have)"; vndk_declare "$ver"; return 0; fi
     warn "VNDK: vendor butuh VNDK v$ver tapi APEX-nya tidak ada di system donor -> HAL vendor gagal load kalau tidak ditambah"
     rm -rf "$tmp"; mkdir -p "$tmp"
     for img in system_ext system; do
@@ -463,6 +463,47 @@ vndk_compat() {
     cp -f "$found" "$apexd/"; chmod 0644 "$apexd/$(basename "$found")"
     ok "VNDK: $(basename "$found") ($(( $(stat -c%s "$found") / 1048576 )) MB) disalin dari base ke system_ext/apex"
     rm -rf "$tmp"
+    vndk_declare "$ver"
+}
+
+# framework manifest harus mendeklarasikan <vendor-ndk> versi yang diminta device matrix vendor.
+# Android baru tidak lagi menulis vendor-ndk lama -> tambah fragment manifest framework.
+vndk_declare() {
+    local ver=$1 d f
+    for d in "$P_FS/system/system" "$P_FS/system_ext" "$P_FS/product"; do
+        [[ -d $d/etc/vintf ]] || continue
+        if grep -lsE "<version>[[:space:]]*${ver}[[:space:]]*</version>" "$d"/etc/vintf/manifest.xml "$d"/etc/vintf/manifest/*.xml 2>/dev/null \
+            | xargs -r grep -l '<vendor-ndk>' 2>/dev/null | grep -q .; then
+            ok "VINTF: vendor-ndk $ver sudah dideklarasikan framework ($(basename "$d"))"
+            return 0
+        fi
+    done
+    d="$P_FS/system/system/etc/vintf/manifest"
+    if [[ ! -d $P_FS/system/system/etc/vintf ]]; then warn "VINTF: system/etc/vintf port tidak ada, vendor-ndk $ver tidak bisa dideklarasikan"; return 0; fi
+    mkdir -p "$d"; f="$d/vendor_ndk_v$ver.xml"
+    printf '<manifest version="1.0" type="framework">\n    <vendor-ndk>\n        <version>%s</version>\n    </vendor-ndk>\n</manifest>\n' "$ver" > "$f"
+    chmod 0644 "$f"; chmod 0755 "$d"
+    ok "VINTF: vendor-ndk $ver dideklarasikan di system/etc/vintf/manifest/$(basename "$f")"
+}
+
+# arah sebaliknya: yang DIMINTA device matrix vendor/odm (vendor-ndk, system-sdk,
+# HAL framework wajib) harus disediakan framework manifest port.
+vintf_device_check() {
+    local args=() f d n
+    while IFS= read -r -d '' f; do args+=(--device-matrix "$f"); done \
+        < <(find "$B_FS/vendor/etc/vintf" "$B_FS/odm/etc/vintf" -maxdepth 1 -type f -name 'compatibility_matrix*.xml' -print0 2>/dev/null || true)
+    if [[ ${#args[@]} -eq 0 ]]; then warn "VINTF: device compatibility matrix vendor/odm tidak ditemukan, cek dilewati"; return 0; fi
+    for d in "$P_FS/system/system" "$P_FS/system_ext" "$P_FS/product"; do
+        if [[ -d $d ]]; then args+=(--framework "$d"); fi
+    done
+    python3 "$SCRIPT_DIR/vintf_check.py" "${args[@]}" > "$WORK/vintf_device.log" 2>&1 || true
+    while IFS= read -r d; do printf '    %s\n' "$d"; done < "$WORK/vintf_device.log"
+    n=$(sed -n 's/^RESULT //p' "$WORK/vintf_device.log" | tail -n1)
+    if [[ ${n:-0} =~ ^[0-9]+$ ]] && (( ${n:-0} > 0 )); then
+        warn "VINTF: $n kebutuhan device matrix vendor tidak dipenuhi framework port -> dialog 'internal problem' / HAL terkait gagal (lihat MISSING)"
+    else
+        ok "VINTF: semua kebutuhan device matrix vendor/odm dipenuhi framework port"
+    fi
 }
 
 linker_check() {
@@ -1300,6 +1341,7 @@ main() {
     fi
     check_vintf
     if is_true "$VNDK_COMPAT"; then vndk_compat; fi
+    vintf_device_check
     if is_true "$LINKER_CHECK"; then linker_check; fi
 
     DEBLOAT_KEEP=$(debloat_keep)
