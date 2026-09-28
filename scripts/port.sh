@@ -31,7 +31,9 @@ RECOVERY_SUPER=${RECOVERY_SUPER:-raw}      # raw = images/super.img | zst = imag
 RECOVERY_IMG=${RECOVERY_IMG:-}              # opsional: URL/path recovery.img custom (OrangeFox dll)
 ZIP_LEVEL=${ZIP_LEVEL:-1}
 KEEP_DOWNLOADS=${KEEP_DOWNLOADS:-false}
-DEBLOAT_PRESET=${DEBLOAT_PRESET:-safe}          # safe = hapus semua data-app (aplikasi preinstall yang bisa di-uninstall) | none
+DEBLOAT_PACKAGES_FILE=${DEBLOAT_PACKAGES_FILE:-}   # default: <repo>/debloat_packages.txt
+DEBLOAT_PRESET=${DEBLOAT_PRESET:-safe}
+DEBLOAT_SAFE_KEEP=${DEBLOAT_SAFE_KEEP:-"MIUIGallery"}  # folder data-app yang tidak ikut dihapus preset safe          # safe = hapus semua data-app (aplikasi preinstall yang bisa di-uninstall) | none
 FIT_FALLBACK_EROFS=${FIT_FALLBACK_EROFS:-true}  # super tidak muat -> vendor/odm otomatis EROFS
 EXTRACT_EROFS=${EXTRACT_EROFS:-}           # opsional: extract.erofs versi baru (dicoba duluan)
 WORK=${WORK:-$PWD/work}
@@ -40,6 +42,7 @@ OUT=${OUT:-$PWD/out}
 FIXED_TS=1230768000
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DEVICE_FILES_DIR=${DEVICE_FILES_DIR:-$SCRIPT_DIR/../devices/$TARGET_DEVICE}
+DEBLOAT_PACKAGES_FILE=${DEBLOAT_PACKAGES_FILE:-$SCRIPT_DIR/../debloat_packages.txt}
 BIN="$TOOLS_DIR/bin/Linux/x86_64"
 PYBIN="$TOOLS_DIR/bin"
 export PATH="$BIN:$PATH"
@@ -470,26 +473,104 @@ patch_port_resources() {
 
     if [[ $DEBLOAT_PRESET == safe ]]; then
         local d freed=0 sz
+        # isi semua folder data-app dihapus, kecuali yang ada di DEBLOAT_SAFE_KEEP
         while IFS= read -r -d '' d; do
+            if in_list "$(basename "$d")" "$DEBLOAT_SAFE_KEEP"; then
+                log "debloat (safe): ${d#"$P_FS"/} dipertahankan"; continue
+            fi
             sz=$(du -sb "$d" | cut -f1); freed=$(( freed + sz ))
             log "debloat (safe): ${d#"$P_FS"/} ($(( sz / 1048576 )) MB)"
             rm -rf "$d"
-        done < <(find "$P_FS" -mindepth 2 -maxdepth 4 -type d -name data-app -print0)
+        done < <(find "$P_FS" -mindepth 3 -maxdepth 5 -type d -path '*/data-app/*' -prune -print0)
         ok "debloat safe: data-app dihapus, hemat $(( freed / 1048576 )) MB"
     fi
 
-    for item in $DEBLOAT; do
+    debloat_packages
+
+    for item in ${DEBLOAT//,/ }; do
+        [[ $item == */* ]] || continue          # nama package ditangani debloat_packages
         item=${item#/}
         if [[ -e $P_FS/$item ]]; then rm -rf "${P_FS:?}/$item"; ok "debloat: $item"
-        else warn "debloat: $item tidak ada"; fi
+        else log "debloat: $item tidak ada, dilewati"; fi
     done
+}
+
+# package yang tidak boleh dihapus walau ada di daftar (bisa bikin bootloop)
+PROTECTED_PACKAGES="android com.android.systemui com.android.settings com.android.phone \
+com.android.providers.settings com.android.providers.telephony com.android.shell \
+com.miui.home com.miui.securitycenter com.miui.core com.miui.system com.miui.rom \
+com.android.permissioncontroller com.google.android.webview com.android.webview \
+com.google.android.gms com.google.android.gsf com.android.vending com.xiaomi.xmsf \
+com.android.packageinstaller com.miui.packageinstaller com.android.inputmethod.latin"
+
+# debloat berdasarkan nama package: dari file debloat_packages.txt + input debloat.
+# Format bebas: pisah koma/baris/spasi, label setelah '|' atau '#' diabaikan.
+# Package yang tidak ada di ROM dilewati (build tidak dibatalkan).
+# folder APK yang tidak boleh dihapus walau ada di daftar
+PROTECTED_APPS="SystemUI MiuiSystemUI Settings MiuiHome SecurityCenter MIUISecurityCenter \
+TeleService Telecom PermissionController GooglePermissionController GmsCore PrebuiltGmsCore \
+Phonesky GoogleServicesFramework WebViewGoogle WebViewGoogle64 webview Shell \
+SettingsProvider TelephonyProvider PackageInstaller MIUIPackageInstaller framework-res \
+MiuiFrameworkResOverlay XiaomiServiceFramework"
+
+# token daftar debloat: pisah koma / baris / spasi; label setelah '|' atau '#' dibuang
+debloat_tokens() {
+    { if [[ -f $DEBLOAT_PACKAGES_FILE ]]; then cat "$DEBLOAT_PACKAGES_FILE"; fi; printf '\n%s\n' "$DEBLOAT"; } \
+        | sed -e 's/#.*//' | tr ',' '\n' | sed -e 's/|.*//' | tr -s '[:space:]' '\n' | grep -v '^$' || true
+}
+
+# debloat berdasarkan nama package (com.xxx) dan nama folder APK (MiuiCompass).
+# Yang tidak ada di ROM dilewati, build tidak dibatalkan.
+debloat_packages() {
+    local toks pkgs apps idx="$WORK/apk_index.tsv" pkg app dir d sz freed=0 hit=0 miss=""
+    toks=$(debloat_tokens)
+    pkgs=$(grep -E '^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$' <<< "$toks" | sort -u | tr '\n' ' ' || true)
+    apps=$(grep -E '^[A-Za-z][A-Za-z0-9_-]*$' <<< "$toks" | sort -u | tr '\n' ' ' || true)
+    [[ -n ${pkgs// /}${apps// /} ]] || return 0
+    log "debloat: $(wc -w <<< "$pkgs") nama package + $(wc -w <<< "$apps") nama folder APK"
+
+    # --- nama package
+    if [[ -n ${pkgs// /} ]]; then
+        python3 "$SCRIPT_DIR/apk_index.py" "$P_FS" > "$idx"
+        log "  $(wc -l < "$idx") APK terindeks di ROM port"
+        for pkg in $pkgs; do
+            if in_list "$pkg" "$PROTECTED_PACKAGES"; then warn "debloat: $pkg dilindungi (penting untuk boot)"; continue; fi
+            dir=$(awk -F'\t' -v p="$pkg" '$1 == p {print $2; exit}' "$idx")
+            if [[ -z $dir || ! -d $P_FS/$dir ]]; then miss+=" $pkg"; continue; fi
+            sz=$(du -sb "$P_FS/$dir" | cut -f1); freed=$(( freed + sz )); hit=$((hit + 1))
+            rm -rf "${P_FS:?}/$dir"
+            ok "debloat: $pkg -> $dir ($(( sz / 1048576 )) MB)"
+        done
+    fi
+
+    # --- nama folder APK (di app/, priv-app/, data-app/ semua partisi port)
+    for app in $apps; do
+        if in_list "$app" "$PROTECTED_APPS"; then warn "debloat: $app dilindungi (penting untuk boot)"; continue; fi
+        local found=0
+        while IFS= read -r -d '' d; do
+            sz=$(du -sb "$d" | cut -f1); freed=$(( freed + sz )); hit=$((hit + 1)); found=1
+            rm -rf "$d"
+            ok "debloat: $app -> ${d#"$P_FS"/} ($(( sz / 1048576 )) MB)"
+        done < <(find "$P_FS" -mindepth 3 -maxdepth 6 -type d \
+                    \( -path "*/app/$app" -o -path "*/priv-app/$app" -o -path "*/data-app/$app" \) -prune -print0)
+        if [[ $found == 0 ]]; then miss+=" $app"; fi
+    done
+
+    ok "debloat: $hit dihapus, hemat $(( freed / 1048576 )) MB"
+    if [[ -n $miss ]]; then log "  tidak ada di ROM (dilewati):$miss"; fi
 }
 
 report_app_sizes() { # 25 aplikasi terbesar di partisi port (bahan debloat manual)
     log "25 aplikasi/folder terbesar di ROM port (untuk input debloat):"
+    local rep="$WORK/app_sizes.txt"
     find "$P_FS" -mindepth 2 -maxdepth 5 -type d \( -path '*/app/*' -o -path '*/priv-app/*' -o -path '*/data-app/*' \) \
-        -prune -print0 2>/dev/null | xargs -0 -r du -sm 2>/dev/null | sort -rn | head -n 25 | \
-        while read -r sz d; do printf '    %6s MB  %s\n' "$sz" "${d#"$P_FS"/}"; done
+        -prune -print0 2>/dev/null | xargs -0 -r du -sm 2>/dev/null > "$rep.raw" || true
+    sort -rn "$rep.raw" > "$rep" || true
+    local n=0 sz d
+    while read -r sz d; do
+        n=$((n + 1)); [[ $n -le 25 ]] || break
+        printf '    %6s MB  %s\n' "$sz" "${d#"$P_FS"/}"
+    done < "$rep"
 }
 
 # file tambahan dari repo: devices/<device>/<partisi>/... ditimpa ke hasil ekstrak
