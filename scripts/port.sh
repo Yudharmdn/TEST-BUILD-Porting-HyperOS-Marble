@@ -27,6 +27,9 @@ REPLACE_FROM_BASE=${REPLACE_FROM_BASE:-"device_features displayconfig overlay ca
 DEBLOAT=${DEBLOAT:-""}
 EROFS_COMP=${EROFS_COMP:-"lz4hc,9"}
 EXT4_HEADROOM_MB=${EXT4_HEADROOM_MB:-128}
+DEBLOAT_KEEP=""
+PROP_MERGE=${PROP_MERGE:-true}             # salin props khas device dari product/etc/build.prop base
+OVERLAY_FIX=${OVERLAY_FIX:-true}           # buang overlay khas donor, salin overlay khas marble
 INSTALLER=${INSTALLER:-auto}                # auto | base (META-INF dari ROM base, mis. xiaomi.eu) | ours
 RECOVERY_SUPER=${RECOVERY_SUPER:-raw}      # raw = images/super.img | zst = images/super.img.zst
 RECOVERY_IMG=${RECOVERY_IMG:-}              # opsional: URL/path recovery.img custom (OrangeFox dll)
@@ -373,6 +376,92 @@ repack_ext4() { # root name out_img rw(true/false)
     done
     if ! is_true "$rw"; then
         resize2fs -f -M "$img" >/dev/null 2>&1 || true
+    fi
+}
+
+# ------------------------------------------------------------------ cek VINTF
+# target-level manifest vendor/odm harus ada di compatibility matrix framework donor.
+# checkvintf (toolkit, rilis 2024) dijalankan sebagai info: bisa belum kenal level A17.
+check_vintf() {
+    local levels="" lv f m matrices sysd="$P_FS/system/system/etc/vintf" out
+    while IFS= read -r -d '' f; do
+        lv=$(grep -oE 'target-level="[0-9]+"' "$f" | grep -oE '[0-9]+' | head -n1 || true)
+        if [[ -n $lv ]]; then levels+=" $lv"; log "VINTF: ${f#"$B_FS"/} target-level=$lv"; fi
+    done < <(find "$B_FS/vendor/etc/vintf" "$B_FS/odm/etc/vintf" -maxdepth 2 -type f -name '*.xml' -print0 2>/dev/null || true)
+    levels=$(tr ' ' '\n' <<< "$levels" | grep -v '^$' | sort -u | tr '\n' ' ' || true)
+    if [[ ! -d $sysd ]]; then warn "VINTF: $sysd tidak ada"; return 0; fi
+    matrices=$(find "$sysd" -maxdepth 1 -name 'compatibility_matrix.*.xml' -printf '%f ' | sed 's/compatibility_matrix\.//g; s/\.xml//g')
+    log "VINTF: framework donor mendukung level: $matrices"
+    if [[ -z ${levels// /} ]]; then
+        warn "VINTF: target-level vendor tidak ditemukan"
+    else
+        for lv in $levels; do
+            if in_list "$lv" "$matrices"; then ok "VINTF: level $lv didukung framework donor"
+            else warn "VINTF: level $lv TIDAK ada di framework donor -> risiko besar bootloop (HAL vendor tidak dikenali)"; fi
+        done
+    fi
+    # checkvintf (informasi saja, tidak menggagalkan build)
+    if command -v checkvintf >/dev/null; then
+        m=()
+        for f in system:system/system system_ext:system_ext product:product; do
+            if [[ -d $P_FS/${f#*:} ]]; then m+=(--dirmap "/${f%%:*}:$P_FS/${f#*:}"); fi
+        done
+        for f in vendor odm; do
+            if [[ -d $B_FS/$f ]]; then m+=(--dirmap "/$f:$B_FS/$f"); fi
+        done
+        out=$(timeout 300 checkvintf --check-compat "${m[@]}" 2>&1 | tail -n 15 || true)
+        if grep -qiE 'compatible|^OK|INCOMPATIBLE|error' <<< "$out"; then
+            log "checkvintf (info, bisa belum kenal Android 17):"
+            while IFS= read -r f; do printf '    %s\n' "$f"; done <<< "$out"
+        fi
+    fi
+}
+
+# ------------------------------------------------------------------ props device
+merge_device_props() {
+    local bp="$B_FS/product/etc/build.prop" pp="$P_FS/product/etc/build.prop" n
+    if [[ ! -f $bp || ! -f $pp ]]; then warn "props: build.prop product base/port tidak ada, dilewati"; return 0; fi
+    python3 "$SCRIPT_DIR/prop_merge.py" "$bp" "$pp" > "$WORK/prop_merge.log"
+    n=$(wc -l < "$WORK/prop_merge.log")
+    ok "props: $n props khas device dari product base disalin ke product port"
+    if [[ $n -gt 0 ]]; then sed 's/^/    /' "$WORK/prop_merge.log" | head -n 80; fi
+    if [[ $n -gt 80 ]]; then log "    ... ($((n - 80)) lainnya di log kerja)"; fi
+}
+
+# ------------------------------------------------------------------ overlay
+# overlay donor yang namanya/package-nya memuat codename donor -> dibuang
+# overlay base yang memuat codename marble dan belum ada di port -> disalin
+fix_overlays() { # donor base
+    local donor=${1,,} base=${2,,} f rel pkg name removed=0 added=0 donor_only=""
+    local pod="$P_FS/product/overlay" bod="$B_FS/product/overlay"
+    [[ -d $pod ]] || return 0
+    [[ -n $donor ]] || { warn "overlay: codename donor tidak diketahui, dilewati"; return 0; }
+    while IFS= read -r -d '' f; do
+        rel=${f#"$pod"/}; name=$(basename "$f" .apk)
+        pkg=$(python3 "$SCRIPT_DIR/apk_index.py" --apk "$f")
+        if [[ ${name,,} == *"$donor"* || ${pkg,,} == *"$donor"* ]]; then
+            if is_kept "product/overlay/$rel" "$name" "$pkg"; then continue; fi
+            rm -f "$f"; rmdir "$(dirname "$f")" 2>/dev/null || true
+            removed=$((removed + 1)); ok "overlay donor dibuang: $rel ($pkg)"
+        elif [[ ! -e $bod/$rel ]]; then
+            donor_only+=" $rel"
+        fi
+    done < <(find "$pod" -maxdepth 3 -type f -name '*.apk' -print0)
+    if [[ -d $bod ]]; then
+        while IFS= read -r -d '' f; do
+            rel=${f#"$bod"/}; name=$(basename "$f" .apk)
+            [[ -e $pod/$rel ]] && continue
+            pkg=$(python3 "$SCRIPT_DIR/apk_index.py" --apk "$f")
+            if [[ ${name,,} == *"$base"* || ${pkg,,} == *"$base"* ]]; then
+                mkdir -p "$(dirname "$pod/$rel")"; cp -a "$f" "$pod/$rel"
+                added=$((added + 1)); ok "overlay marble disalin: $rel ($pkg)"
+            fi
+        done < <(find "$bod" -maxdepth 3 -type f -name '*.apk' -print0)
+    fi
+    ok "overlay: $removed dibuang, $added disalin dari base"
+    if [[ -n $donor_only ]]; then
+        log "overlay yang cuma ada di donor (cek manual, tambahkan ke debloat kalau khas $donor):"
+        tr ' ' '\n' <<< "$donor_only" | grep -v '^$' | sed 's|^|    product/overlay/|'
     fi
 }
 
@@ -1132,7 +1221,7 @@ main() {
     log "donor=$donor  base=$base_dev  versi port=$port_ver"
 
     # kompatibilitas: sepolicy mapping & VINTF
-    local sver fcm
+    local sver
     sver=""
     if [[ -f $B_FS/vendor/etc/selinux/plat_sepolicy_vers.txt ]]; then
         sver=$(tr -d '[:space:]' < "$B_FS/vendor/etc/selinux/plat_sepolicy_vers.txt")
@@ -1141,13 +1230,12 @@ main() {
         if [[ -f $P_FS/system/system/etc/selinux/mapping/$sver.cil ]]; then ok "sepolicy mapping $sver.cil ada"
         else warn "system donor TIDAK punya selinux/mapping/$sver.cil -> kemungkinan besar bootloop"; fi
     fi
-    fcm=$(grep -oE 'target-level="[0-9]+"' "$B_FS/vendor/etc/vintf/manifest.xml" 2>/dev/null | grep -oE '[0-9]+' | head -n1 || true)
-    if [[ -n $fcm ]]; then
-        if ls "$P_FS"/system/system/etc/vintf/compatibility_matrix."$fcm".xml >/dev/null 2>&1; then ok "VINTF FCM level $fcm didukung"
-        else warn "compatibility_matrix.$fcm.xml tidak ada di system donor -> cek VINTF"; fi
-    fi
+    check_vintf
 
+    DEBLOAT_KEEP=$(debloat_keep)
+    if is_true "$PROP_MERGE"; then merge_device_props; fi
     patch_props "$donor" "$base_dev"
+    if is_true "$OVERLAY_FIX"; then fix_overlays "$donor" "$base_dev"; fi
     report_app_sizes
     patch_port_resources
     apply_device_files
