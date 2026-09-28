@@ -72,6 +72,8 @@ env:
   DISABLE_AVB: "true"
   EROFS_COMP: "lz4hc,9"
   EXT4_HEADROOM_MB: "128"
+  VNDK_COMPAT: "true"          # vendor butuh VNDK APEX versi lama -> salin dari ROM base
+  LINKER_CHECK: "true"         # laporan dependensi linker ELF vendor/odm (info)
   VINTF_COMPAT: "true"         # FCM level vendor tak dikenal donor -> salin compatibility_matrix dari system base
   PROP_MERGE: "true"           # salin props khas device dari product/etc/build.prop base marble
   OVERLAY_FIX: "true"          # buang overlay khas donor, salin overlay khas marble
