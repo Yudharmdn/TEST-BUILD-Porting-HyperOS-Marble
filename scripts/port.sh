@@ -27,6 +27,7 @@ REPLACE_FROM_BASE=${REPLACE_FROM_BASE:-"device_features displayconfig overlay ca
 DEBLOAT=${DEBLOAT:-""}
 EROFS_COMP=${EROFS_COMP:-"lz4hc,9"}
 EXT4_HEADROOM_MB=${EXT4_HEADROOM_MB:-128}
+INSTALLER=${INSTALLER:-auto}                # auto | base (META-INF dari ROM base, mis. xiaomi.eu) | ours
 RECOVERY_SUPER=${RECOVERY_SUPER:-raw}      # raw = images/super.img | zst = images/super.img.zst
 RECOVERY_IMG=${RECOVERY_IMG:-}              # opsional: URL/path recovery.img custom (OrangeFox dll)
 BOOT_IMG=${BOOT_IMG:-}                      # opsional: URL/path boot.img custom (kernel), menggantikan boot.img base
@@ -163,7 +164,7 @@ env_get() { # file KEY -> value (dari output lp_tool.py)
 }
 
 load_base_env() { # muat info base (super/payload/anti) ke variabel global
-    unset LP_SUPER_SIZE LP_METADATA_MAX LP_METADATA_SLOTS LP_BLOCK_SIZE LP_VIRTUAL_AB \
+    unset SUPER_LAYOUT SUPER_LAYOUT_MAGIC LP_SUPER_SIZE LP_METADATA_MAX LP_METADATA_SLOTS LP_BLOCK_SIZE LP_VIRTUAL_AB \
           LP_GROUPS LP_PARTITIONS LP_PARTITION_SIZES PAYLOAD_PARTITIONS \
           PAYLOAD_DYN_PARTITIONS PAYLOAD_DYN_GROUPS PAYLOAD_SNAPSHOT PAYLOAD_VABC ANTI_VER
     local f
@@ -222,10 +223,24 @@ collect_images() { # src_tree dst pfx
         anti=$(grep -oE 'CURRENT_ANTI_VER=[0-9]+' "$f" | head -n1 | cut -d= -f2 || true)
         if [[ -n $anti ]]; then echo "ANTI_VER=$anti" >> "$WORK/${pfx}.env"; fi
     fi
+    # simpan META-INF (installer recovery) ROM base untuk INSTALLER=base
+    local meta
+    meta=$(find "$src" -maxdepth 3 -type d -name META-INF | head -n1)
+    if [[ -n $meta && -e $meta/com/google/android/update-binary ]]; then
+        rm -rf "$WORK/${pfx}_META-INF"; cp -a "$meta" "$WORK/${pfx}_META-INF"
+        log "[$pfx] META-INF disimpan ($(find "$meta" -type f | wc -l) file)"
+    fi
     # super bisa bernama super.img / super.img.zst / super.zst / split .0 .1 ... di folder mana pun
     mapfile -t sparts < <(find "$src" -type f -iname 'super*' ! -iname 'super_empty*' \
         ! -iname '*.txt' ! -iname '*.sh' ! -iname '*.bat' ! -iname '*.md5' ! -iname '*.sha*' | sort -V)
     if [[ ${#sparts[@]} -gt 0 ]]; then
+        # path relatif ke root zip (induk META-INF, atau induk folder images)
+        local zroot
+        if [[ -n $meta ]]; then zroot=$(dirname "$meta"); else zroot=$(dirname "$dir"); fi
+        {
+            echo "SUPER_LAYOUT=\"$(for f in "${sparts[@]}"; do printf '%s ' "${f#"$zroot"/}"; done)\""
+            echo "SUPER_LAYOUT_MAGIC=$(head -c 4 "${sparts[0]}" | od -An -tx1 | tr -d ' \n')"
+        } >> "$WORK/${pfx}.env"
         assemble_super "$dst" "${sparts[@]}"
     else
         warn "[$pfx] tidak ada file super* di ROM"
@@ -847,7 +862,8 @@ build_super() {
     done
     printf '  %-14s %12d / %d bytes (%d%%)\n' TOTAL "$total" "$gmax" $(( total * 100 / gmax ))
     [[ $total -le $gmax ]] || die "partisi melebihi kapasitas super ($(( total / 1048576 )) MB > $(( gmax / 1048576 )) MB). Tambah path di input debloat (lihat daftar '25 aplikasi terbesar' di tahap 4) atau kosongkan ext4_partitions."
-    # recovery menulis super pakai dd -> harus raw (bukan sparse)
+    # installer kita menulis super pakai dd -> raw; installer base (xiaomi.eu) memakai sparse
+    if [[ ${SUPER_SPARSE:-false} == true ]]; then args+=(--sparse); fi
     if ! lpmake "${args[@]}" --output "$out" >"$WORK/lpmake.log" 2>&1; then
         tail -n 30 "$WORK/lpmake.log" >&2; die "lpmake gagal"
     fi
@@ -870,6 +886,109 @@ replace_boot() { # path boot.img base di paket
     hv=$(od -An -tu4 -j40 -N4 "$src" | tr -d ' ')
     cp -f "$src" "$dst"
     ok "boot.img diganti: ${BOOT_IMG##*/} ($(( ssz / 1048576 )) MB, header v$hv)"
+}
+
+# ------------------------------------------------------------------ installer base (xiaomi.eu)
+installer_mode() { # -> base | ours
+    case $INSTALLER in
+        base) [[ -d $WORK/base_META-INF ]] || die "INSTALLER=base tapi ROM base tidak punya META-INF"; echo base ;;
+        ours) echo ours ;;
+        *)    if [[ -d $WORK/base_META-INF ]]; then echo base; else echo ours; fi ;;
+    esac
+}
+
+# samakan bentuk super dengan ROM base: images/super.img.0..N (sparse) / super.img / .zst
+match_super_layout() { # pkg
+    local pkg=$1 sup="$1/images/super.img" first n prefix f
+    [[ -n ${SUPER_LAYOUT:-} ]] || { warn "layout super base tidak diketahui, super.img sparse tunggal"; return 0; }
+    read -r -a SL <<< "$SUPER_LAYOUT"
+    first=${SL[0]}; n=${#SL[@]}
+    log "layout super base: ${SUPER_LAYOUT}"
+    if [[ $n -gt 1 && $first =~ ^(.+)\.0$ ]]; then
+        prefix=${BASH_REMATCH[1]}
+        for f in "${SL[@]}"; do
+            [[ $f == "$prefix".* ]] || die "layout super base tidak dikenal: $SUPER_LAYOUT"
+        done
+        mkdir -p "$pkg/$(dirname "$prefix")"
+        python3 "$SCRIPT_DIR/sparse_split.py" "$sup" "$pkg/$prefix" "$n" >/dev/null
+        rm -f "$sup"
+        ok "super dipecah jadi $n potongan sparse: $prefix.0 .. $prefix.$((n - 1))"
+    elif [[ $n -eq 1 && ${SUPER_LAYOUT_MAGIC:-} == 28b52ffd ]]; then
+        mkdir -p "$pkg/$(dirname "$first")"
+        zstd -q -T0 -"${ZSTD_LEVEL:-3}" --rm "$sup" -o "$pkg/$first"
+        ok "super dikompres zstd: $first"
+    elif [[ $n -eq 1 ]]; then
+        if [[ $first != images/super.img ]]; then mkdir -p "$pkg/$(dirname "$first")"; mv -f "$sup" "$pkg/$first"; fi
+        ok "super sparse tunggal: $first"
+    fi
+}
+
+# hapus perintah flash recovery.img dari installer base (recovery HP dipertahankan)
+strip_recovery_refs() { # pkg
+    local pkg=$1 f changed
+    for f in "$pkg/META-INF/com/google/android/updater-script" "$pkg/META-INF/com/google/android/update-binary"; do
+        [[ -f $f ]] || continue
+        grep -q 'recovery\.img' "$f" 2>/dev/null || continue
+        if ! grep -Iq . "$f"; then
+            die "$(basename "$f") (biner) merujuk recovery.img dan tidak bisa diedit. Isi RECOVERY_IMG atau pakai INSTALLER=ours"
+        fi
+        changed=$(python3 - "$f" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8", errors="surrogateescape").read()
+n = 0
+# edify: package_extract_file("...recovery.img", "...") -> ui_print (ekspresi tetap valid di dalam ifelse)
+s, k = re.subn(r'package_extract_file\(\s*"[^"]*recovery\.img"\s*,\s*"[^"]*"\s*\)',
+               'ui_print("- recovery dilewati (recovery HP dipertahankan)")', s)
+n += k
+# shell: baris yang memakai recovery.img -> no-op
+out = []
+for line in s.split("\n"):
+    if "recovery.img" in line and "ui_print(" not in line:
+        out.append(": # recovery.img dilewati (recovery HP dipertahankan)")
+        n += 1
+    else:
+        out.append(line)
+open(p, "w", encoding="utf-8", errors="surrogateescape").write("\n".join(out))
+print(n)
+PY
+)
+        ok "installer: $changed perintah flash recovery.img dihapus dari $(basename "$f")"
+    done
+}
+
+# pakai META-INF ROM base apa adanya, lalu cek semua file yang dirujuk installer ada di paket
+apply_base_installer() { # pkg
+    local pkg=$1 ref missing="" unref="" f n=0
+    local us="$pkg/META-INF/com/google/android/updater-script" ub="$pkg/META-INF/com/google/android/update-binary"
+    log "installer: META-INF dari ROM base ($( { file -b "$ub" 2>/dev/null || echo "?"; } | cut -c1-60))"
+    if [[ -f $us ]] && grep -qiE 'sha1_check|sha256|apply_patch|block_image_verify' "$us"; then
+        warn "updater-script base mengecek hash/patch - file yang diubah (super, boot, vbmeta) bisa ditolak installer"
+    fi
+    # file yang dirujuk (teks updater-script + string di update-binary)
+    ref=$( { [[ -f $us ]] && cat "$us"; strings -n 6 "$ub" 2>/dev/null; } \
+        | grep -oE '(images|firmware-update)/[A-Za-z0-9_.+-]+' | sort -u || true)
+    for f in $ref; do
+        n=$((n + 1))
+        if [[ ! -e $pkg/$f ]]; then
+            # file ada tapi di folder lain -> pindahkan ke path yang dirujuk
+            if [[ -e $pkg/images/${f##*/} ]]; then
+                mkdir -p "$pkg/$(dirname "$f")"; mv -f "$pkg/images/${f##*/}" "$pkg/$f"
+            else
+                missing+=" $f"
+            fi
+        fi
+    done
+    for f in "$pkg"/images/*; do
+        [[ -e $f ]] || continue
+        if ! grep -qx "images/${f##*/}" <<< "$ref"; then unref+=" ${f##*/}"; fi
+    done
+    log "installer merujuk $n file"
+    if [[ -n $unref ]]; then log "  tidak dirujuk installer (tidak di-flash):$unref"; fi
+    if [[ -n $missing ]]; then
+        die "installer base merujuk file yang tidak ada di paket:$missing"
+    fi
+    ok "installer base: semua file yang dirujuk ada"
 }
 
 # ------------------------------------------------------------------ recovery zip
@@ -1074,8 +1193,11 @@ main() {
     local super_list
     # shellcheck disable=SC2086  # daftar sengaja di-split
     super_list=$(printf '%s\n' $logical $PORT_PARTITIONS | awk '!s[$0]++' | tr '\n' ' ')
-    local pkg="$OUT/pkg"
+    local pkg="$OUT/pkg" mode
     mkdir -p "$pkg/images"
+    mode=$(installer_mode)
+    log "installer: $mode"
+    if [[ $mode == base ]]; then SUPER_SPARSE=true; fi
     build_super "$super_list" "$pkg/images/super.img"
     rm -rf "$OUT_IMG_TMP"
     group_end
@@ -1091,11 +1213,22 @@ main() {
         ok "recovery.img diganti: $(basename "$RECOVERY_IMG")"
     fi
     if [[ -n $BOOT_IMG ]]; then replace_boot "$pkg/images/boot.img"; fi
-    if [[ $RECOVERY_SUPER == zst ]]; then
-        log "kompres super.img -> super.img.zst"
-        zstd -q -T0 -"${ZSTD_LEVEL:-3}" --rm "$pkg/images/super.img" -o "$pkg/images/super.img.zst"
+    if [[ -z $RECOVERY_IMG ]]; then
+        rm -f "$pkg/images/recovery.img"
+        log "recovery.img tidak dimasukkan (recovery di HP tidak ditimpa)"
     fi
-    write_recovery_pkg "$pkg" "$port_ver"
+    if [[ $mode == base ]]; then
+        match_super_layout "$pkg"
+        rm -rf "$pkg/META-INF"; cp -a "$WORK/base_META-INF" "$pkg/META-INF"
+        if [[ -z $RECOVERY_IMG ]]; then strip_recovery_refs "$pkg"; fi
+        apply_base_installer "$pkg"
+    else
+        if [[ $RECOVERY_SUPER == zst ]]; then
+            log "kompres super.img -> super.img.zst"
+            zstd -q -T0 -"${ZSTD_LEVEL:-3}" --rm "$pkg/images/super.img" -o "$pkg/images/super.img.zst"
+        fi
+        write_recovery_pkg "$pkg" "$port_ver"
+    fi
     local stamp name
     stamp=$(date +%Y%m%d)
     name="HyperOS_${port_ver}_${TARGET_DEVICE}_port_${stamp}"
@@ -1105,11 +1238,11 @@ main() {
         echo "disable_encryption=$DISABLE_ENCRYPTION"; echo "rw_mount=$RW_MOUNT"
         echo "disable_avb=$DISABLE_AVB"; echo "debug_adb=$DEBUG_ADB"
         echo "super_size=$SUPER_SIZE"; echo "super_format=$RECOVERY_SUPER"
-        echo "boot_img=${BOOT_IMG:-base}"
+        echo "boot_img=${BOOT_IMG:-base}"; echo "installer=$mode"
         echo "anti_ver=${ANTI_VER:-unknown}"; echo "build_date=$stamp"
     } > "$pkg/META-INF/port_info.txt"
     ls -la "$pkg/images"
-    (cd "$pkg" && zip -q -r -"$ZIP_LEVEL" -n .zst "$OUT/$name.zip" META-INF images)
+    (cd "$pkg" && zip -q -r -"$ZIP_LEVEL" -n .zst "$OUT/$name.zip" .)
     rm -rf "$pkg"
     (cd "$OUT" && sha256sum "$name.zip" > "$name.zip.sha256")
     ok "SELESAI: $OUT/$name.zip ($(du -h "$OUT/$name.zip" | cut -f1))"
