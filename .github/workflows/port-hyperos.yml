@@ -25,7 +25,7 @@ on:
       ext4_partitions:
         description: "Partisi yang dibangun EXT4 (sisanya EROFS)"
         required: false
-        default: "vendor odm system vendor_dlkm product system_ext"
+        default: "vendor odm"
         type: string
       debloat:
         description: "Path yang dihapus dari port, pisah spasi (mis. product/app/Foo)"
