@@ -20,7 +20,7 @@ on:
       super_size:
         description: "Ukuran super (byte). auto = baca dari super.img base fastboot"
         required: false
-        default: "9663676416"
+        default: "auto"
         type: string
       ext4_partitions:
         description: "Partisi yang dibangun EXT4 (sisanya EROFS)"
@@ -72,6 +72,8 @@ env:
   DISABLE_AVB: "true"
   EROFS_COMP: "lz4hc,9"
   EXT4_HEADROOM_MB: "128"
+  PROP_MERGE: "true"           # salin props khas device dari product/etc/build.prop base marble
+  OVERLAY_FIX: "true"          # buang overlay khas donor, salin overlay khas marble
   INSTALLER: base               # base = pakai META-INF ROM base (xiaomi.eu) | ours = installer buatan script
   RECOVERY_SUPER: raw          # raw = images/super.img | zst = images/super.img.zst (zip lebih kecil)
   # boot.img custom (kernel melt-rebase) menggantikan boot.img base; kosongkan untuk pakai boot base
@@ -83,7 +85,7 @@ env:
   DEBLOAT_PRESET: none         # debloat hanya dari debloat_packages.txt (safe = + hapus semua data-app)
   DEBLOAT_SAFE_KEEP: "MIUIGallery"   # folder data-app yang dipertahankan (pisah spasi)
   FIT_FALLBACK_EROFS: "true"   # super tidak muat -> vendor/odm otomatis EROFS
-  ZIP_LEVEL: "6"                # 1 = cepat/zip besar ... 9 = paling kecil (tahap zip lebih lama)
+  ZIP_LEVEL: "9"                # 1 = cepat/zip besar ... 9 = paling kecil (tahap zip lebih lama)
   TOOLKIT_REPO: toraidl/hyperos_port
   TOOLKIT_SHA: 523b0f6378e77e9e93ba6e15a064f45b26274eab
   SPLIT_SIZE: 1900M
@@ -262,4 +264,3 @@ jobs:
               echo "SHA256: \`$(cut -d' ' -f1 out/*.sha256 | head -n1)\`"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-          
