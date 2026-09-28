@@ -2,16 +2,17 @@
 # =============================================================================
 #  port.sh - Quick-port HyperOS dari device donor ke marble (POCO F5)
 #
-#  Konsep: firmware + boot/vendor_boot/dtbo + vendor/odm/*_dlkm dari BASE
-#  (ROM resmi marble), system/system_ext/product/mi_ext dari PORT (donor).
+#  Konsep: firmware + boot/vendor_boot/dtbo + vendor/odm/vendor_dlkm dari BASE
+#  (ROM marble, mis. xiaomi.eu), system/system_ext/product/mi_ext dari PORT (donor).
 #  Output: zip flashable recovery (META-INF/ + images/), untuk OrangeFox/TWRP.
+#  INSTALLER=base: META-INF & layout images/super.img.N disamakan dengan zip base.
 #
 #  Semua setting lewat env (key=value), default di bawah.
 # =============================================================================
 set -Eeuo pipefail
 
 # ------------------------------------------------------------------ config
-BASE_ROM=${BASE_ROM:?BASE_ROM wajib (URL / path ROM resmi marble)}
+BASE_ROM=${BASE_ROM:?BASE_ROM wajib (URL / path ROM marble, mis. zip xiaomi.eu)}
 PORT_ROM=${PORT_ROM:?PORT_ROM wajib (URL / path ROM donor HyperOS)}
 TOOLS_DIR=${TOOLS_DIR:?TOOLS_DIR wajib (root toolkit berisi bin/)}
 
@@ -34,7 +35,7 @@ VINTF_COMPAT=${VINTF_COMPAT:-true}         # level FCM vendor tidak dikenal fram
 PROP_MERGE=${PROP_MERGE:-true}             # salin props khas device dari product/etc/build.prop base
 OVERLAY_FIX=${OVERLAY_FIX:-true}           # buang overlay khas donor, salin overlay khas marble
 INSTALLER=${INSTALLER:-auto}                # auto | base (META-INF dari ROM base, mis. xiaomi.eu) | ours
-RECOVERY_SUPER=${RECOVERY_SUPER:-raw}      # raw = images/super.img | zst = images/super.img.zst
+RECOVERY_SUPER=${RECOVERY_SUPER:-raw}      # hanya INSTALLER=ours: raw = images/super.img | zst = images/super.img.zst
 RECOVERY_IMG=${RECOVERY_IMG:-}              # opsional: URL/path recovery.img custom (OrangeFox dll)
 BOOT_IMG=${BOOT_IMG:-}                      # opsional: URL/path boot.img custom (kernel), menggantikan boot.img base
 GBOARD_APK=${GBOARD_APK:-}                  # opsional: URL/path Gboard (LatinImeGoogle.apk) -> jadi keyboard sistem
@@ -43,8 +44,8 @@ GBOARD_PACKAGE=${GBOARD_PACKAGE:-com.charlie.android.inputmethod.latin}   # pack
 ZIP_LEVEL=${ZIP_LEVEL:-1}
 KEEP_DOWNLOADS=${KEEP_DOWNLOADS:-false}
 DEBLOAT_PACKAGES_FILE=${DEBLOAT_PACKAGES_FILE:-}   # default: <repo>/debloat_packages.txt
-DEBLOAT_PRESET=${DEBLOAT_PRESET:-none}
-DEBLOAT_SAFE_KEEP=${DEBLOAT_SAFE_KEEP:-"MIUIGallery"}  # folder data-app yang tidak ikut dihapus preset safe          # safe = hapus semua data-app (aplikasi preinstall yang bisa di-uninstall) | none
+DEBLOAT_PRESET=${DEBLOAT_PRESET:-none}     # none | safe (= + hapus semua data-app)
+DEBLOAT_SAFE_KEEP=${DEBLOAT_SAFE_KEEP:-"MIUIGallery"}  # folder data-app yang tidak ikut dihapus preset safe
 FIT_FALLBACK_EROFS=${FIT_FALLBACK_EROFS:-true}  # super tidak muat -> vendor/odm otomatis EROFS
 EXTRACT_EROFS=${EXTRACT_EROFS:-}           # opsional: extract.erofs versi baru (dicoba duluan)
 WORK=${WORK:-$PWD/work}
@@ -383,8 +384,9 @@ repack_ext4() { # root name out_img rw(true/false)
 }
 
 # ------------------------------------------------------------------ cek VINTF
-# target-level manifest vendor/odm harus ada di compatibility matrix framework donor.
-# checkvintf (toolkit, rilis 2024) dijalankan sebagai info: bisa belum kenal level A17.
+# target-level manifest vendor/odm harus ada di compatibility matrix FRAMEWORK
+# (/system/etc/vintf/compatibility_matrix.<level>.xml). Kalau tidak ada, matrix level itu
+# disalin dari system base ke /system/etc/vintf port. File vintf vendor/odm tidak disentuh.
 check_vintf() {
     local levels="" lv f matrices sysd="$P_FS/system/system/etc/vintf" missing="" plat
     plat=$(get_prop "$B_FS/vendor/build.prop" ro.board.platform)
@@ -658,6 +660,48 @@ res_from_base() {
     fi
 }
 
+# priv-app yang diambil dari base butuh allowlist privapp-permissions versi base juga.
+# Tanpa ini, izin privileged yang tidak tercatat di allowlist donor bikin system_server
+# crash saat boot (ro.control_privapp_permissions=enforce) -> bootloop.
+base_privapp_perms() { # <rel dir app di base, mis. product/priv-app/MiuiCamera>
+    local rel=$1 part apk pkg out n
+    [[ $rel == */priv-app/* ]] || return 0
+    part=${rel%%/*}
+    apk=$(find "$B_FS/$rel" -maxdepth 1 -name '*.apk' | head -n1)
+    [[ -n $apk ]] || return 0
+    pkg=$(python3 "$SCRIPT_DIR/apk_index.py" --apk "$apk" || true)
+    if [[ -z $pkg ]]; then warn "privapp: package $(basename "$apk") tidak terbaca, allowlist tidak disalin"; return 0; fi
+    out="$P_FS/$part/etc/permissions/privapp-permissions-${TARGET_DEVICE}-base-${pkg//./_}.xml"
+    n=$(python3 - "$pkg" "$out" "$B_FS/$part/etc/permissions" <<'PY'
+import glob, os, re, sys
+pkg, out, d = sys.argv[1], sys.argv[2], sys.argv[3]
+blocks = []
+pat = re.compile(r'<privapp-permissions\s+package="%s"\s*>.*?</privapp-permissions>' % re.escape(pkg), re.S)
+for f in sorted(glob.glob(os.path.join(d, "*.xml"))):
+    try:
+        s = open(f, encoding="utf-8", errors="replace").read()
+    except OSError:
+        continue
+    s = re.sub(r'<!--.*?-->', '', s, flags=re.S)
+    blocks += pat.findall(s)
+if blocks:
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write('<?xml version="1.0" encoding="utf-8"?>\n<!-- allowlist dari ROM base (port.sh) -->\n<permissions>\n')
+        for b in blocks:
+            f.write("    " + b.strip() + "\n")
+        f.write("</permissions>\n")
+    os.chmod(out, 0o644)
+print(sum(len(re.findall(r'<(permission|deny-permission)\s', b)) for b in blocks))
+PY
+)
+    if [[ ${n:-0} -gt 0 ]]; then
+        ok "privapp: $n izin $pkg dari allowlist base -> ${out#"$P_FS"/}"
+    else
+        warn "privapp: allowlist $pkg tidak ditemukan di base $part/etc/permissions. Kalau bootloop dengan 'privapp-permissions allowlist' di logcat, ini penyebabnya"
+    fi
+}
+
 patch_port_resources() {
     local item f src
     DEBLOAT_KEEP=$(debloat_keep)
@@ -689,6 +733,7 @@ patch_port_resources() {
                     mkdir -p "$P_FS/$(dirname "$src")"
                     cp -a "$B_FS/$src" "$P_FS/$src"
                     ok "camera: MiuiCamera dari base $src"
+                    base_privapp_perms "$src"
                 else
                     warn "camera: base tidak punya MiuiCamera, kamera donor dipakai. Kalau crash isi devices/$TARGET_DEVICE/product/priv-app/MiuiCamera"
                 fi ;;
@@ -1315,9 +1360,13 @@ main() {
     # tanpa vendor/odm dari base, ROM pasti tidak bisa boot -> hentikan di sini
     for p in vendor odm; do
         if [[ ! -f $B_IMG/$p.img ]]; then
-            die "base ROM tidak menghasilkan $p.img (super tidak ditemukan/tidak terbaca). Pakai fastboot ROM resmi marble (.tgz) atau OTA zip resmi (payload.bin). Lihat daftar 'isi ROM' di atas."
+            die "base ROM tidak menghasilkan $p.img (super tidak ditemukan/tidak terbaca). Pakai zip recovery xiaomi.eu marble, fastboot ROM .tgz, atau OTA zip (payload.bin). Lihat daftar 'isi ROM' di atas."
         fi
     done
+    # INSTALLER=base butuh META-INF dari zip base: cek sekarang, bukan setelah 20 menit build
+    if [[ $INSTALLER == base && ! -d $WORK/base_META-INF ]]; then
+        die "INSTALLER=base tapi ROM base tidak punya META-INF (fastboot .tgz / OTA payload tidak punya installer recovery). Pakai zip xiaomi.eu marble, atau set INSTALLER: ours di workflow"
+    fi
 
     # ---------------- 2. PORT
     group_start "2/7 Port ROM (donor)"
@@ -1365,6 +1414,13 @@ main() {
     if [[ -n $sver ]]; then
         if [[ -f $P_FS/system/system/etc/selinux/mapping/$sver.cil ]]; then ok "sepolicy mapping $sver.cil ada"
         else warn "system donor TIDAK punya selinux/mapping/$sver.cil -> kemungkinan besar bootloop"; fi
+        # system_ext/product yang punya sepolicy sendiri juga dimuat init dengan mapping versi vendor
+        local sp
+        for sp in system_ext product; do
+            ls "$P_FS/$sp/etc/selinux/"*_sepolicy.cil >/dev/null 2>&1 || continue
+            if [[ -f $P_FS/$sp/etc/selinux/mapping/$sver.cil ]]; then ok "sepolicy mapping $sp/$sver.cil ada"
+            else warn "$sp donor punya sepolicy tapi tanpa mapping/$sver.cil -> kalau type vendor merujuk type $sp, sepolicy gagal compile (bootloop ke recovery)"; fi
+        done
     fi
     check_vintf
     if is_true "$VNDK_COMPAT"; then vndk_compat; fi
