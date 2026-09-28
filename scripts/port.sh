@@ -28,11 +28,12 @@ DEBLOAT=${DEBLOAT:-""}
 EROFS_COMP=${EROFS_COMP:-"lz4hc,9"}
 EXT4_HEADROOM_MB=${EXT4_HEADROOM_MB:-128}
 RECOVERY_SUPER=${RECOVERY_SUPER:-raw}      # raw = images/super.img | zst = images/super.img.zst
-RECOVERY_IMG=${RECOVERY_IMG:-}              # opsional: URL/path recovery.img custom (OrangeFox dll)
+RECOVERY_IMG=${RECOVERY_IMG:-}
+BOOT_IMG=${BOOT_IMG:-}                      # opsional: URL/path boot.img custom (kernel), menggantikan boot.img base              # opsional: URL/path recovery.img custom (OrangeFox dll)
 ZIP_LEVEL=${ZIP_LEVEL:-1}
 KEEP_DOWNLOADS=${KEEP_DOWNLOADS:-false}
 DEBLOAT_PACKAGES_FILE=${DEBLOAT_PACKAGES_FILE:-}   # default: <repo>/debloat_packages.txt
-DEBLOAT_PRESET=${DEBLOAT_PRESET:-safe}
+DEBLOAT_PRESET=${DEBLOAT_PRESET:-none}
 DEBLOAT_SAFE_KEEP=${DEBLOAT_SAFE_KEEP:-"MIUIGallery"}  # folder data-app yang tidak ikut dihapus preset safe          # safe = hapus semua data-app (aplikasi preinstall yang bisa di-uninstall) | none
 FIT_FALLBACK_EROFS=${FIT_FALLBACK_EROFS:-true}  # super tidak muat -> vendor/odm otomatis EROFS
 EXTRACT_EROFS=${EXTRACT_EROFS:-}           # opsional: extract.erofs versi baru (dicoba duluan)
@@ -487,12 +488,36 @@ patch_port_resources() {
 
     debloat_packages
 
-    for item in ${DEBLOAT//,/ }; do
-        [[ $item == */* ]] || continue          # nama package ditangani debloat_packages
+    # path (ada '/'), dari debloat_packages.txt dan input debloat, relatif ke root partisi port
+    local sz
+    while IFS= read -r item; do
         item=${item#/}
-        if [[ -e $P_FS/$item ]]; then rm -rf "${P_FS:?}/$item"; ok "debloat: $item"
-        else log "debloat: $item tidak ada, dilewati"; fi
-    done
+        case $item in *..*|"") warn "debloat: path '$item' tidak valid, dilewati"; continue ;; esac
+        if [[ -e $P_FS/$item ]]; then
+            if in_list "$(basename "$item")" "$PROTECTED_APPS"; then warn "debloat: $item dilindungi"; continue; fi
+            sz=$(du -sb "$P_FS/$item" | cut -f1)
+            rm -rf "${P_FS:?}/$item"; ok "debloat: $item ($(( sz / 1048576 )) MB)"
+        else
+            log "debloat: $item tidak ada, dilewati"
+        fi
+    done < <(debloat_tokens | grep '/' | sort -u || true)
+
+    check_ime_left
+}
+
+# peringatan kalau semua keyboard terhapus (setup awal butuh keyboard untuk password Wi-Fi)
+IME_PACKAGES="com.sohu.inputmethod.sogou.xiaomi com.sohu.inputmethod.sogou com.baidu.input_mi \
+com.iflytek.inputmethod.miui com.google.android.inputmethod.latin com.android.inputmethod.latin \
+com.touchtype.swiftkey com.samsung.android.honeyboard"
+check_ime_left() {
+    local left
+    left=$(python3 "$SCRIPT_DIR/apk_index.py" "$P_FS" | cut -f1 | while read -r p; do
+        if in_list "$p" "$IME_PACKAGES"; then echo "$p"; fi; done | tr '\n' ' ')
+    if [[ -n ${left// /} ]]; then
+        ok "keyboard tersisa: $left"
+    else
+        warn "TIDAK ADA keyboard tersisa di ROM (Sogou/Baidu/iFlytek/Gboard terhapus). Setup awal tidak bisa mengetik password Wi-Fi. Pertahankan salah satu IME di debloat_packages.txt"
+    fi
 }
 
 # package yang tidak boleh dihapus walau ada di daftar (bisa bikin bootloop)
@@ -762,6 +787,24 @@ build_super() {
     ok "super.img dibuat ($(du -h "$out" | cut -f1))"
 }
 
+# ------------------------------------------------------------------ boot custom
+replace_boot() { # path boot.img base di paket
+    local dst=$1 src magic ssz dsz hv
+    src=$(fetch "$BOOT_IMG" "$WORK/dl" boot_custom.img)
+    magic=$(head -c 8 "$src" | od -An -c | tr -d ' ')
+    [[ $magic == "ANDROID!" ]] || die "BOOT_IMG bukan boot image Android (8 byte awal: $(head -c 8 "$src" | od -An -tx1 | tr -d '\n'))"
+    ssz=$(stat -c%s "$src")
+    if [[ -f $dst ]]; then
+        dsz=$(stat -c%s "$dst")
+        if [[ $ssz -gt $dsz ]]; then
+            die "boot.img custom ($ssz byte) lebih besar dari boot.img base ($dsz byte = ukuran partisi)"
+        fi
+    fi
+    hv=$(od -An -tu4 -j40 -N4 "$src" | tr -d ' ')
+    cp -f "$src" "$dst"
+    ok "boot.img diganti: ${BOOT_IMG##*/} ($(( ssz / 1048576 )) MB, header v$hv)"
+}
+
 # ------------------------------------------------------------------ recovery zip
 # write_recovery_pkg <pkg_dir> <port_ver>
 #   isi zip: META-INF/com/google/android/{update-binary,updater-script}
@@ -837,6 +880,7 @@ main() {
     check_url BASE_ROM "$BASE_ROM"
     check_url PORT_ROM "$PORT_ROM"
     if [[ -n $RECOVERY_IMG ]]; then check_url RECOVERY_IMG "$RECOVERY_IMG"; fi
+    if [[ -n $BOOT_IMG ]]; then check_url BOOT_IMG "$BOOT_IMG"; fi
     group_end
 
     group_start "1/7 Base ROM ($TARGET_DEVICE)"
@@ -978,6 +1022,7 @@ main() {
         cp -f "$rec" "$pkg/images/recovery.img"
         ok "recovery.img diganti: $(basename "$RECOVERY_IMG")"
     fi
+    if [[ -n $BOOT_IMG ]]; then replace_boot "$pkg/images/boot.img"; fi
     if [[ $RECOVERY_SUPER == zst ]]; then
         log "kompres super.img -> super.img.zst"
         zstd -q -T0 -"${ZSTD_LEVEL:-3}" --rm "$pkg/images/super.img" -o "$pkg/images/super.img.zst"
@@ -992,6 +1037,7 @@ main() {
         echo "disable_encryption=$DISABLE_ENCRYPTION"; echo "rw_mount=$RW_MOUNT"
         echo "disable_avb=$DISABLE_AVB"; echo "debug_adb=$DEBUG_ADB"
         echo "super_size=$SUPER_SIZE"; echo "super_format=$RECOVERY_SUPER"
+        echo "boot_img=${BOOT_IMG:-base}"
         echo "anti_ver=${ANTI_VER:-unknown}"; echo "build_date=$stamp"
     } > "$pkg/META-INF/port_info.txt"
     ls -la "$pkg/images"
