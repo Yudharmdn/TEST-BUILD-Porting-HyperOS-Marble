@@ -97,6 +97,22 @@ fetch() { # src dest_dir name -> echo path
     fi
 }
 
+check_url() { # label url
+    local label=$1 url=$2 code name
+    [[ $url =~ ^https?:// ]] || return 0
+    name=${url%%\?*}; name=${name##*/}
+    case $name in
+        *.zip|*.tgz|*.tar.gz|*.tar|*.tar.zst|*.tar.xz|*.bin|*.img) ;;
+        *) warn "$label: nama file '$name' tidak berakhiran .zip/.tgz/.img - URL kemungkinan terpotong" ;;
+    esac
+    code=$(curl -sL -r 0-0 -o /dev/null -w '%{http_code}' --retry 2 --max-time 60 "$url" || echo 000)
+    case $code in
+        200|206) ok "$label: URL bisa diakses ($name)" ;;
+        404) die "$label: file tidak ditemukan (HTTP 404). Cek URL lengkap sampai .zip: $url" ;;
+        *)   die "$label: URL tidak bisa diakses (HTTP $code): $url" ;;
+    esac
+}
+
 # ------------------------------------------------------------------ unpack ROM
 # unpack_rom <rom_file> <out_images_dir> <prefix> [partisi,dipisah,koma|all]
 unpack_rom() {
@@ -156,9 +172,12 @@ unpack_payload() { # payload dst pfx want
             if in_list "$p" "$avail"; then list+="${list:+,}$p"; fi
         done
         [[ -n $list ]] || die "[$pfx] tidak ada partisi $want di payload"
-        payload-dumper-go -c "$(nproc)" -p "$list" -o "$dst" "$pl"
-    else
-        payload-dumper-go -c "$(nproc)" -o "$dst" "$pl"
+        list="-p $list"
+    fi
+    log "[$pfx] payload-dumper-go ${list:-(semua partisi)}"
+    # shellcheck disable=SC2086  # list sengaja di-split (kosong = semua)
+    if ! payload-dumper-go -c "$(nproc)" $list -o "$dst" "$pl" > "$WORK/pdg_$pfx.log" 2>&1; then
+        tail -n 30 "$WORK/pdg_$pfx.log" >&2; die "[$pfx] payload-dumper-go gagal"
     fi
     rm -f "$pl"
 }
@@ -427,10 +446,19 @@ build_super() {
     slots=3
 
     if [[ $SUPER_SIZE == auto ]]; then
-        SUPER_SIZE=${LP_SUPER_SIZE:-}
-        [[ -n $SUPER_SIZE && $SUPER_SIZE -gt 0 ]] || die "SUPER_SIZE=auto tapi base bukan fastboot ROM (tidak ada super.img).
-  Isi SUPER_SIZE manual. Cek di HP: adb shell su -c 'blockdev --getsize64 /dev/block/by-name/super'"
+        if [[ -n ${LP_SUPER_SIZE:-} && $LP_SUPER_SIZE -gt 0 ]]; then
+            SUPER_SIZE=$LP_SUPER_SIZE
+            log "super_size dari super.img base: $SUPER_SIZE"
+        elif [[ -n ${PAYLOAD_DYN_GROUPS:-} ]]; then
+            # Xiaomi VAB: group qti_dynamic_partitions = super - 4 MiB
+            local g0=${PAYLOAD_DYN_GROUPS%% *}
+            SUPER_SIZE=$(( ${g0##*:} + 4194304 ))
+            warn "super_size diturunkan dari payload (group ${g0##*:} + 4 MiB) = $SUPER_SIZE. Installer akan membatalkan flash kalau tidak sama dengan partisi super HP."
+        else
+            die "SUPER_SIZE=auto tapi ukuran tidak bisa dibaca dari base. Isi super_size manual: adb shell su -c 'blockdev --getsize64 /dev/block/by-name/super'"
+        fi
     fi
+    [[ $SUPER_SIZE =~ ^[0-9]+$ ]] || die "super_size harus angka byte, bukan '$SUPER_SIZE'"
 
     if [[ -n ${LP_GROUPS:-} ]]; then
         grp=${LP_GROUPS%% *}; gmax=${grp##*:}; grp=${grp%:*}; grp=${grp%_a}
@@ -495,6 +523,7 @@ write_recovery_pkg() {
         -e "s|@PORT_VERSION@|$ver|g" \
         -e "s|@ANTI_VER@|${ANTI_VER:-}|g" \
         -e "s|@SUPER_FORMAT@|$RECOVERY_SUPER|g" \
+        -e "s|@SUPER_BYTES@|$SUPER_SIZE|g" \
         -e "s|@FLASH_RECOVERY@|$flash_rec|g" \
         -e "s|@AB_IMAGES@|${ab[*]}|g" \
         -e "s|@NONAB_IMAGES@|$nonab_found|g" \
@@ -517,7 +546,7 @@ write_recovery_pkg() {
 # ================================================================== MAIN
 main() {
     [[ $RECOVERY_SUPER == raw || $RECOVERY_SUPER == zst ]] || die "RECOVERY_SUPER harus raw atau zst"
-    need python3 unzip zip zstd tar gettype extract.erofs mkfs.erofs mke2fs e2fsdroid \
+    need curl python3 unzip zip zstd tar gettype extract.erofs mkfs.erofs mke2fs e2fsdroid \
          resize2fs lpmake simg2img magiskboot payload-dumper-go
     rm -rf "$WORK" "$OUT"
     mkdir -p "$WORK/dl" "$OUT"
@@ -531,6 +560,12 @@ main() {
     mkdir -p "$OUT_IMG_TMP"
 
     # ---------------- 1. BASE
+    group_start "0/7 Cek URL"
+    check_url BASE_ROM "$BASE_ROM"
+    check_url PORT_ROM "$PORT_ROM"
+    if [[ -n $RECOVERY_IMG ]]; then check_url RECOVERY_IMG "$RECOVERY_IMG"; fi
+    group_end
+
     group_start "1/7 Base ROM ($TARGET_DEVICE)"
     local base_file port_file
     base_file=$(fetch "$BASE_ROM" "$WORK/dl" base_rom)

@@ -10,6 +10,7 @@ TARGET="@TARGET_DEVICE@"
 PORT_VERSION="@PORT_VERSION@"
 ANTI_VER="@ANTI_VER@"
 SUPER_FORMAT="@SUPER_FORMAT@"
+SUPER_BYTES="@SUPER_BYTES@"
 FLASH_RECOVERY="@FLASH_RECOVERY@"
 AB_IMAGES="@AB_IMAGES@"
 NONAB_IMAGES="@NONAB_IMAGES@"
@@ -74,6 +75,20 @@ for prop in ro.product.device ro.product.vendor.device ro.build.product ro.produ
 done
 [ "$dev_ok" = 1 ] || abort "Device bukan $TARGET ($(getprop ro.product.device))"
 ui_print "- Device: $TARGET OK"
+
+# ---- ukuran super image harus sama persis dengan partisi super HP
+[ -e "$BLK/super" ] || abort "partisi super tidak ditemukan"
+real=$(blockdev --getsize64 "$BLK/super" 2>/dev/null)
+if [ -n "$real" ]; then
+    if [ "$real" != "$SUPER_BYTES" ]; then
+        ui_print "! Ukuran super HP  : $real byte"
+        ui_print "! Ukuran super ROM : $SUPER_BYTES byte"
+        abort "Ukuran beda. Build ulang dengan input super_size=$real"
+    fi
+    ui_print "- Ukuran super cocok ($real byte)"
+else
+    ui_print "! blockdev tidak tersedia, ukuran super tidak bisa dicek"
+fi
 
 # ---- cek isi zip
 unzip -l "$ZIPFILE" images/super.img images/super.img.zst 2>/dev/null | grep -q "images/super" \
