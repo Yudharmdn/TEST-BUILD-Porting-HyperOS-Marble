@@ -29,7 +29,9 @@ EROFS_COMP=${EROFS_COMP:-"lz4hc,9"}
 EXT4_HEADROOM_MB=${EXT4_HEADROOM_MB:-128}
 RECOVERY_SUPER=${RECOVERY_SUPER:-raw}      # raw = images/super.img | zst = images/super.img.zst
 RECOVERY_IMG=${RECOVERY_IMG:-}
-BOOT_IMG=${BOOT_IMG:-}                      # opsional: URL/path boot.img custom (kernel), menggantikan boot.img base              # opsional: URL/path recovery.img custom (OrangeFox dll)
+BOOT_IMG=${BOOT_IMG:-}
+GBOARD_APK=${GBOARD_APK:-}                  # opsional: URL/path Gboard (LatinImeGoogle.apk) -> jadi keyboard sistem
+GBOARD_DIR=${GBOARD_DIR:-product/app/LatinImeGoogle}                      # opsional: URL/path boot.img custom (kernel), menggantikan boot.img base              # opsional: URL/path recovery.img custom (OrangeFox dll)
 ZIP_LEVEL=${ZIP_LEVEL:-1}
 KEEP_DOWNLOADS=${KEEP_DOWNLOADS:-false}
 DEBLOAT_PACKAGES_FILE=${DEBLOAT_PACKAGES_FILE:-}   # default: <repo>/debloat_packages.txt
@@ -445,6 +447,10 @@ res_from_base() {
 patch_port_resources() {
     local item f src
     DEBLOAT_KEEP=$(debloat_keep)
+    if [[ -n $GBOARD_APK ]]; then
+        add_gboard
+        DEBLOAT_KEEP+=" $GBOARD_DIR ${GBOARD_DIR##*/} com.google.android.inputmethod.latin"
+    fi
     if [[ -n ${DEBLOAT_KEEP// /} ]]; then log "debloat keep: $DEBLOAT_KEEP"; fi
     for item in $REPLACE_FROM_BASE; do
         case $item in
@@ -509,6 +515,33 @@ patch_port_resources() {
     check_ime_left
 }
 
+# Gboard sebagai aplikasi sistem. Jadi keyboard default kalau keyboard sistem lain
+# (Sogou/Baidu) di-debloat: Android memilih IME sistem yang tersisa saat boot pertama.
+add_gboard() {
+    local src dst="$P_FS/$GBOARD_DIR" name pkg abi n
+    name=${GBOARD_DIR##*/}
+    if [[ ! -d $P_FS/${GBOARD_DIR%%/*} ]]; then warn "Gboard: partisi ${GBOARD_DIR%%/*} tidak ada, dilewati"; return 0; fi
+    src=$(fetch "$GBOARD_APK" "$WORK/dl" "$name.apk")
+    pkg=$(python3 "$SCRIPT_DIR/apk_index.py" --apk "$src")
+    [[ -n $pkg ]] || die "GBOARD_APK bukan APK valid (AndroidManifest tidak terbaca)"
+    if [[ $pkg != com.google.android.inputmethod.latin ]]; then
+        warn "Gboard: package APK '$pkg', bukan com.google.android.inputmethod.latin"
+    fi
+    rm -rf "$dst"; mkdir -p "$dst"
+    cp -f "$src" "$dst/$name.apk"
+    chmod 0644 "$dst/$name.apk"
+    # lib native diekstrak ke lib/arm64 supaya jalan walau lib di APK terkompres
+    for abi in arm64-v8a armeabi-v7a; do
+        n=$(unzip -Z1 "$src" "lib/$abi/*.so" 2>/dev/null | wc -l || true)
+        [[ $n -gt 0 ]] || continue
+        local tgt=arm64; [[ $abi == armeabi-v7a ]] && tgt=arm
+        mkdir -p "$dst/lib/$tgt"
+        unzip -q -j -o "$src" "lib/$abi/*.so" -d "$dst/lib/$tgt"
+        chmod 0644 "$dst/lib/$tgt/"*.so
+    done
+    ok "Gboard: $pkg -> $GBOARD_DIR/$name.apk ($(( $(stat -c%s "$src") / 1048576 )) MB)"
+}
+
 # peringatan kalau semua keyboard terhapus (setup awal butuh keyboard untuk password Wi-Fi)
 IME_PACKAGES="com.sohu.inputmethod.sogou.xiaomi com.sohu.inputmethod.sogou com.baidu.input_mi \
 com.iflytek.inputmethod.miui com.google.android.inputmethod.latin com.android.inputmethod.latin \
@@ -519,6 +552,9 @@ check_ime_left() {
         if in_list "$p" "$IME_PACKAGES"; then echo "$p"; fi; done | tr '\n' ' ')
     if [[ -n ${left// /} ]]; then
         ok "keyboard tersisa: $left"
+        if [[ $(wc -w <<< "$left") -gt 1 ]] && in_list com.google.android.inputmethod.latin "$left"; then
+            warn "masih ada keyboard sistem lain selain Gboard ($left). Default saat boot pertama bisa bukan Gboard; debloat keyboard lain supaya Gboard pasti default"
+        fi
     else
         warn "TIDAK ADA keyboard tersisa di ROM (Sogou/Baidu/iFlytek/Gboard terhapus). Setup awal tidak bisa mengetik password Wi-Fi. Pertahankan salah satu IME di debloat_packages.txt"
     fi
@@ -897,6 +933,7 @@ main() {
     check_url PORT_ROM "$PORT_ROM"
     if [[ -n $RECOVERY_IMG ]]; then check_url RECOVERY_IMG "$RECOVERY_IMG"; fi
     if [[ -n $BOOT_IMG ]]; then check_url BOOT_IMG "$BOOT_IMG"; fi
+    if [[ -n $GBOARD_APK ]]; then check_url GBOARD_APK "$GBOARD_APK"; fi
     group_end
 
     group_start "1/7 Base ROM ($TARGET_DEVICE)"
