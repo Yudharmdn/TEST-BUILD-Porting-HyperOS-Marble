@@ -28,6 +28,7 @@ DEBLOAT=${DEBLOAT:-""}
 EROFS_COMP=${EROFS_COMP:-"lz4hc,9"}
 EXT4_HEADROOM_MB=${EXT4_HEADROOM_MB:-128}
 DEBLOAT_KEEP=""
+VINTF_COMPAT=${VINTF_COMPAT:-true}         # level FCM vendor tidak dikenal framework donor -> salin matrix dari system base
 PROP_MERGE=${PROP_MERGE:-true}             # salin props khas device dari product/etc/build.prop base
 OVERLAY_FIX=${OVERLAY_FIX:-true}           # buang overlay khas donor, salin overlay khas marble
 INSTALLER=${INSTALLER:-auto}                # auto | base (META-INF dari ROM base, mis. xiaomi.eu) | ours
@@ -383,38 +384,50 @@ repack_ext4() { # root name out_img rw(true/false)
 # target-level manifest vendor/odm harus ada di compatibility matrix framework donor.
 # checkvintf (toolkit, rilis 2024) dijalankan sebagai info: bisa belum kenal level A17.
 check_vintf() {
-    local levels="" lv f m matrices sysd="$P_FS/system/system/etc/vintf" out
+    local levels="" lv f matrices sysd="$P_FS/system/system/etc/vintf" missing="" plat
+    plat=$(get_prop "$B_FS/vendor/build.prop" ro.board.platform)
     while IFS= read -r -d '' f; do
         lv=$(grep -oE 'target-level="[0-9]+"' "$f" | grep -oE '[0-9]+' | head -n1 || true)
-        if [[ -n $lv ]]; then levels+=" $lv"; log "VINTF: ${f#"$B_FS"/} target-level=$lv"; fi
-    done < <(find "$B_FS/vendor/etc/vintf" "$B_FS/odm/etc/vintf" -maxdepth 2 -type f -name '*.xml' -print0 2>/dev/null || true)
+        [[ -n $lv ]] && levels+=" $lv"
+    done < <(find "$B_FS/vendor/etc/vintf" "$B_FS/odm/etc/vintf" -maxdepth 2 -type f -name 'manifest*.xml' -print0 2>/dev/null || true)
     levels=$(tr ' ' '\n' <<< "$levels" | grep -v '^$' | sort -u | tr '\n' ' ' || true)
     if [[ ! -d $sysd ]]; then warn "VINTF: $sysd tidak ada"; return 0; fi
     matrices=$(find "$sysd" -maxdepth 1 -name 'compatibility_matrix.*.xml' -printf '%f ' | sed 's/compatibility_matrix\.//g; s/\.xml//g')
+    log "VINTF: vendor/odm target-level: ${levels:-?} (platform ${plat:-?}, sku $TARGET_DEVICE)"
     log "VINTF: framework donor mendukung level: $matrices"
-    if [[ -z ${levels// /} ]]; then
-        warn "VINTF: target-level vendor tidak ditemukan"
+    if [[ -z ${levels// /} ]]; then warn "VINTF: target-level vendor tidak ditemukan"; return 0; fi
+    for lv in $levels; do
+        if in_list "$lv" "$matrices"; then ok "VINTF: level $lv didukung framework donor"; else missing+=" $lv"; fi
+    done
+    [[ -n $missing ]] || return 0
+
+    if ! is_true "$VINTF_COMPAT"; then
+        warn "VINTF: level$missing TIDAK ada di framework donor -> risiko bootloop / dialog 'internal problem'"
+        return 0
+    fi
+    # ambil compatibility_matrix.<level>.xml dari system ROM base (Android lama masih punya)
+    local img="$B_IMG/system.img" tmp="$WORK/base_vintf" t src
+    if [[ ! -f $img ]]; then warn "VINTF: system.img base tidak ada, level$missing tidak bisa ditambal"; return 0; fi
+    rm -rf "$tmp"; mkdir -p "$tmp"
+    t=$(gettype -i "$img" 2>/dev/null || true)
+    if [[ $t == erofs ]]; then
+        "${EXTRACT_EROFS:-$BIN/extract.erofs}" -i "$img" -X system/etc/vintf -o "$tmp" >/dev/null 2>&1 \
+            || "$BIN/extract.erofs" -i "$img" -X system/etc/vintf -o "$tmp" >/dev/null 2>&1 || true
     else
-        for lv in $levels; do
-            if in_list "$lv" "$matrices"; then ok "VINTF: level $lv didukung framework donor"
-            else warn "VINTF: level $lv TIDAK ada di framework donor -> risiko besar bootloop (HAL vendor tidak dikenali)"; fi
-        done
+        python3 "$PYBIN/imgextractor/imgextractor.py" "$img" "$tmp" >/dev/null 2>&1 || true
     fi
-    # checkvintf (informasi saja, tidak menggagalkan build)
-    if command -v checkvintf >/dev/null; then
-        m=()
-        for f in system:system/system system_ext:system_ext product:product; do
-            if [[ -d $P_FS/${f#*:} ]]; then m+=(--dirmap "/${f%%:*}:$P_FS/${f#*:}"); fi
-        done
-        for f in vendor odm; do
-            if [[ -d $B_FS/$f ]]; then m+=(--dirmap "/$f:$B_FS/$f"); fi
-        done
-        out=$(timeout 300 checkvintf --check-compat "${m[@]}" 2>&1 | tail -n 15 || true)
-        if grep -qiE 'compatible|^OK|INCOMPATIBLE|error' <<< "$out"; then
-            log "checkvintf (info, bisa belum kenal Android 17):"
-            while IFS= read -r f; do printf '    %s\n' "$f"; done <<< "$out"
+    for lv in $missing; do
+        src=$(find "$tmp" -type f -path "*/etc/vintf/compatibility_matrix.$lv.xml" | head -n1)
+        if [[ -n $src ]]; then
+            cp -f "$src" "$sysd/compatibility_matrix.$lv.xml"
+            chmod 0644 "$sysd/compatibility_matrix.$lv.xml"
+            ok "VINTF: compatibility_matrix.$lv.xml disalin dari system base (level $lv jadi dikenali)"
+        else
+            warn "VINTF: level $lv TIDAK ada di framework donor maupun system base -> risiko bootloop"
         fi
-    fi
+    done
+    rm -rf "$tmp"
+    warn "VINTF: vendor level$missing lebih tua dari yang didukung Android donor. Matrix sudah ditambal, tapi HAL lama tetap bisa tidak dikenali framework baru - cek logcat setelah boot"
 }
 
 # ------------------------------------------------------------------ props device
