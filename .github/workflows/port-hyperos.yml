@@ -75,6 +75,8 @@ env:
   RECOVERY_SUPER: raw          # raw = images/super.img | zst = images/super.img.zst (zip lebih kecil)
   # boot.img custom (kernel melt-rebase) menggantikan boot.img base; kosongkan untuk pakai boot base
   BOOT_IMG: https://github.com/Yudharmdn/boot-melt-rebase/releases/download/boot-melt-rebase/boot.img
+  # Gboard sebagai keyboard sistem (product/app/LatinImeGoogle); kosongkan untuk tidak menambah
+  GBOARD_APK: https://github.com/Yudharmdn/boot-melt-rebase/releases/download/boot-melt-rebase/LatinImeGoogle.apk
   REPLACE_FROM_BASE: "device_features displayconfig overlay camera"
   DEBLOAT_PRESET: none         # debloat hanya dari debloat_packages.txt (safe = + hapus semua data-app)
   DEBLOAT_SAFE_KEEP: "MIUIGallery"   # folder data-app yang dipertahankan (pisah spasi)
