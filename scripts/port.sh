@@ -31,6 +31,8 @@ RECOVERY_SUPER=${RECOVERY_SUPER:-raw}      # raw = images/super.img | zst = imag
 RECOVERY_IMG=${RECOVERY_IMG:-}              # opsional: URL/path recovery.img custom (OrangeFox dll)
 ZIP_LEVEL=${ZIP_LEVEL:-1}
 KEEP_DOWNLOADS=${KEEP_DOWNLOADS:-false}
+DEBLOAT_PRESET=${DEBLOAT_PRESET:-safe}          # safe = hapus semua data-app (aplikasi preinstall yang bisa di-uninstall) | none
+FIT_FALLBACK_EROFS=${FIT_FALLBACK_EROFS:-true}  # super tidak muat -> vendor/odm otomatis EROFS
 EXTRACT_EROFS=${EXTRACT_EROFS:-}           # opsional: extract.erofs versi baru (dicoba duluan)
 WORK=${WORK:-$PWD/work}
 OUT=${OUT:-$PWD/out}
@@ -184,16 +186,44 @@ unpack_payload() { # payload dst pfx want
     rm -f "$pl"
 }
 
+# gabungkan super dari 1..n file (raw / sparse / zstd, boleh split) -> dst/super.img(.zst)
+assemble_super() { # dst_dir part...
+    local dst=$1 magic; shift
+    magic=$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')
+    log "super ditemukan: $(printf '%s ' "${@##*/}")(magic $magic)"
+    if [[ $# -eq 1 ]]; then
+        if [[ $magic == 28b52ffd ]]; then mv -f "$1" "$dst/super.img.zst"; else mv -f "$1" "$dst/super.img"; fi
+        return 0
+    fi
+    case $magic in
+        28b52ffd) cat "$@" | zstd -d -q -o "$dst/super.img" ;;
+        3aff26ed) simg2img "$@" "$dst/super.img" ;;
+        *)        cat "$@" > "$dst/super.img" ;;
+    esac
+    rm -f "$@"
+}
+
 collect_images() { # src_tree dst pfx
-    local src=$1 dst=$2 pfx=$3 dir anti f
-    dir=$(dirname "$(find "$src" -type f \( -name 'super.img*' -o -name 'boot.img' \) | head -n1)")
-    [[ -d $dir && $dir != . ]] || die "[$pfx] folder images/ tidak ditemukan di ROM"
-    f=$(find "$src" -maxdepth 3 -name 'flash_all.sh' | head -n1)
+    local src=$1 dst=$2 pfx=$3 dir anti f sparts=()
+    log "[$pfx] isi ROM (maks 60 file terbesar):"
+    find "$src" -type f -printf '%s %P\n' | sort -rn | head -n 60 | \
+        awk '{printf "    %10.1f MB  %s\n", $1/1048576, $2}'
+    dir=$(dirname "$(find "$src" -type f -name 'boot.img' | head -n1)")
+    [[ -d $dir && $dir != . ]] || die "[$pfx] boot.img / folder images tidak ditemukan di ROM"
+    f=$(find "$src" -maxdepth 3 -name 'flash_all*.sh' | head -n1)
     if [[ -n $f ]]; then
         anti=$(grep -oE 'CURRENT_ANTI_VER=[0-9]+' "$f" | head -n1 | cut -d= -f2 || true)
         if [[ -n $anti ]]; then echo "ANTI_VER=$anti" >> "$WORK/${pfx}.env"; fi
     fi
-    find "$dir" -maxdepth 1 -type f \( -name '*.img' -o -name '*.img.zst' \) -exec mv -t "$dst" {} +
+    # super bisa bernama super.img / super.img.zst / super.zst / split .0 .1 ... di folder mana pun
+    mapfile -t sparts < <(find "$src" -type f -iname 'super*' ! -iname 'super_empty*' \
+        ! -iname '*.txt' ! -iname '*.sh' ! -iname '*.bat' ! -iname '*.md5' ! -iname '*.sha*' | sort -V)
+    if [[ ${#sparts[@]} -gt 0 ]]; then
+        assemble_super "$dst" "${sparts[@]}"
+    else
+        warn "[$pfx] tidak ada file super* di ROM"
+    fi
+    find "$dir" -maxdepth 1 -type f -name '*.img' -exec mv -t "$dst" {} +
 }
 
 unpack_super() { # dst pfx  (kalau ada super.img: pecah jadi partisi logical)
@@ -323,6 +353,21 @@ repack_ext4() { # root name out_img rw(true/false)
 }
 
 # ------------------------------------------------------------------ patch: port
+# codename donor: lewati nama generik (HyperOS baru memakai "miproduct" di product)
+detect_donor() {
+    local c v hint
+    hint=${PORT_ROM%%\?*}; hint=${hint##*/}; hint=${hint%%-ota*}; hint=${hint%%_*}
+    for c in "$(get_prop "$P_FS/mi_ext/etc/build.prop" ro.product.mod_device)" \
+             "$(get_prop "$P_FS/product/etc/build.prop" ro.product.product.device)" \
+             "$(get_prop "$P_FS/product/etc/build.prop" ro.product.product.name)" \
+             "$(get_prop "$P_FS/system_ext/etc/build.prop" ro.product.system_ext.device)" \
+             "$hint"; do
+        v=${c%%_*}
+        case $v in ""|miproduct|mainline|generic|missi*|qssi*|mi_ext|xiaomi*) continue ;; esac
+        echo "$v"; return 0
+    done
+    echo ""
+}
 patch_props() {
     local donor=$1 base=$2 f model brand market dens dens2
     model=$(get_prop "$B_FS/vendor/build.prop" ro.product.vendor.model)
@@ -423,11 +468,28 @@ patch_port_resources() {
         esac
     done
 
+    if [[ $DEBLOAT_PRESET == safe ]]; then
+        local d freed=0 sz
+        while IFS= read -r -d '' d; do
+            sz=$(du -sb "$d" | cut -f1); freed=$(( freed + sz ))
+            log "debloat (safe): ${d#"$P_FS"/} ($(( sz / 1048576 )) MB)"
+            rm -rf "$d"
+        done < <(find "$P_FS" -mindepth 2 -maxdepth 4 -type d -name data-app -print0)
+        ok "debloat safe: data-app dihapus, hemat $(( freed / 1048576 )) MB"
+    fi
+
     for item in $DEBLOAT; do
         item=${item#/}
         if [[ -e $P_FS/$item ]]; then rm -rf "${P_FS:?}/$item"; ok "debloat: $item"
         else warn "debloat: $item tidak ada"; fi
     done
+}
+
+report_app_sizes() { # 25 aplikasi terbesar di partisi port (bahan debloat manual)
+    log "25 aplikasi/folder terbesar di ROM port (untuk input debloat):"
+    find "$P_FS" -mindepth 2 -maxdepth 5 -type d \( -path '*/app/*' -o -path '*/priv-app/*' -o -path '*/data-app/*' \) \
+        -prune -print0 2>/dev/null | xargs -0 -r du -sm 2>/dev/null | sort -rn | head -n 25 | \
+        while read -r sz d; do printf '    %6s MB  %s\n' "$sz" "${d#"$P_FS"/}"; done
 }
 
 # file tambahan dari repo: devices/<device>/<partisi>/... ditimpa ke hasil ekstrak
@@ -469,9 +531,9 @@ patch_vendor_fstab() {
     while IFS= read -r -d '' f; do
         log "fstab vendor: ${f#"$B_FS"/}"
         patch_fstab_file "$f"; found=1
-    done < <(find "$B_FS/vendor/etc" -maxdepth 1 -type f -name 'fstab.*' -print0 2>/dev/null)
+    done < <(if [[ -d $B_FS/vendor/etc ]]; then find "$B_FS/vendor/etc" -maxdepth 1 -type f -name 'fstab.*' -print0; fi)
     if [[ $found != 1 ]]; then
-        warn "fstab di vendor/etc tidak ditemukan. Isi vendor/etc: $(find "$B_FS/vendor/etc" -maxdepth 1 -name 'fstab*' -printf '%f ' 2>/dev/null)"
+        warn "fstab di vendor/etc tidak ditemukan"
     fi
 }
 
@@ -529,11 +591,8 @@ patch_vbmeta() {
 }
 
 # ------------------------------------------------------------------ super
-build_super() {
-    local parts=$1 out=$2 total=0 p img sz attr grp gmax meta slots args=()
-    meta=${LP_METADATA_MAX:-65536}
-    slots=3
-
+resolve_super() { # set SUPER_SIZE (angka), SUPER_GROUP, SUPER_GMAX
+    [[ -z ${SUPER_GMAX:-} ]] || return 0
     if [[ $SUPER_SIZE == auto ]]; then
         if [[ -n ${LP_SUPER_SIZE:-} && $LP_SUPER_SIZE -gt 0 ]]; then
             SUPER_SIZE=$LP_SUPER_SIZE
@@ -550,14 +609,52 @@ build_super() {
     [[ $SUPER_SIZE =~ ^[0-9]+$ ]] || die "super_size harus angka byte, bukan '$SUPER_SIZE'"
 
     if [[ -n ${LP_GROUPS:-} ]]; then
-        grp=${LP_GROUPS%% *}; gmax=${grp##*:}; grp=${grp%:*}; grp=${grp%_a}
+        SUPER_GROUP=${LP_GROUPS%% *}; SUPER_GROUP=${SUPER_GROUP%:*}; SUPER_GROUP=${SUPER_GROUP%_a}
     elif [[ -n ${PAYLOAD_DYN_GROUPS:-} ]]; then
-        grp=${PAYLOAD_DYN_GROUPS%% *}; gmax=${grp##*:}; grp=${grp%:*}
+        SUPER_GROUP=${PAYLOAD_DYN_GROUPS%% *}; SUPER_GROUP=${SUPER_GROUP%:*}
     else
-        grp=qti_dynamic_partitions; gmax=0
+        SUPER_GROUP=qti_dynamic_partitions
     fi
-    [[ $gmax -gt 0 && $gmax -le $SUPER_SIZE ]] || gmax=$(( SUPER_SIZE - 4194304 ))
+    # metadata super ditulis ulang total, jadi batas group = ukuran super - 4 MiB
+    # (group bawaan ROM base bisa lebih kecil, mis. xiaomi.eu 8 GiB)
+    SUPER_GMAX=$(( SUPER_SIZE - 4194304 ))
 
+}
+
+sum_images() { # total byte semua image di OUT_IMG_TMP
+    local t=0 f
+    for f in "$OUT_IMG_TMP"/*.img; do [[ -f $f ]] && t=$(( t + $(stat -c%s "$f") )); done
+    echo "$t"
+}
+
+# kalau tidak muat di super: vendor/odm EXT4 dibangun ulang sebagai EROFS (lebih kecil)
+fit_super() {
+    local total p new=""
+    resolve_super
+    total=$(sum_images)
+    log "cek muat: $(( total / 1048576 )) MB / $(( SUPER_GMAX / 1048576 )) MB"
+    [[ $total -gt $SUPER_GMAX ]] || return 0
+    if ! is_true "$FIT_FALLBACK_EROFS"; then return 0; fi
+    for p in $EXT4_PARTITIONS; do
+        if [[ ($p == vendor || $p == odm) && -d $B_FS/$p ]]; then
+            warn "super tidak muat: $p dibangun ulang sebagai EROFS (read-only, tidak bisa rw)"
+            repack_erofs "$B_FS" "$p" "$OUT_IMG_TMP/$p.img"
+        else
+            new+="${new:+ }$p"
+        fi
+    done
+    EXT4_PARTITIONS=$new
+    total=$(sum_images)
+    log "setelah fallback EROFS: $(( total / 1048576 )) MB / $(( SUPER_GMAX / 1048576 )) MB"
+}
+
+build_super() {
+    local parts=$1 out=$2 total=0 p img sz attr grp gmax meta slots args=()
+    meta=${LP_METADATA_MAX:-65536}
+    slots=3
+
+    resolve_super
+    grp=$SUPER_GROUP; gmax=$SUPER_GMAX
     log "super: size=$SUPER_SIZE group=${grp}_a/_b max=$gmax"
     args=(--metadata-size "$meta" --super-name super --metadata-slots "$slots"
           --device "super:$SUPER_SIZE"
@@ -576,7 +673,7 @@ build_super() {
                --partition "${p}_b:$attr:0:${grp}_b")
     done
     printf '  %-14s %12d / %d bytes (%d%%)\n' TOTAL "$total" "$gmax" $(( total * 100 / gmax ))
-    [[ $total -le $gmax ]] || die "partisi melebihi kapasitas super group ($total > $gmax). Kurangi ext4/headroom atau debloat."
+    [[ $total -le $gmax ]] || die "partisi melebihi kapasitas super ($(( total / 1048576 )) MB > $(( gmax / 1048576 )) MB). Tambah path di input debloat (lihat daftar '25 aplikasi terbesar' di tahap 4) atau kosongkan ext4_partitions."
     # recovery menulis super pakai dd -> harus raw (bukan sparse)
     if ! lpmake "${args[@]}" --output "$out" >"$WORK/lpmake.log" 2>&1; then
         tail -n 30 "$WORK/lpmake.log" >&2; die "lpmake gagal"
@@ -649,7 +746,13 @@ main() {
     mkdir -p "$OUT_IMG_TMP"
 
     # ---------------- 1. BASE
-    group_start "0/7 Cek URL"
+    group_start "0/7 Cek input & URL"
+    if [[ $SUPER_SIZE != auto ]]; then
+        [[ $SUPER_SIZE =~ ^[0-9]+$ ]] || die "super_size harus angka byte atau 'auto', bukan '$SUPER_SIZE'"
+        if [[ $(( SUPER_SIZE % 4096 )) -ne 0 ]]; then
+            die "super_size $SUPER_SIZE bukan kelipatan 4096. Pakai 'auto', atau angka persis dari: adb shell su -c 'blockdev --getsize64 /dev/block/by-name/super'"
+        fi
+    fi
     check_url BASE_ROM "$BASE_ROM"
     check_url PORT_ROM "$PORT_ROM"
     if [[ -n $RECOVERY_IMG ]]; then check_url RECOVERY_IMG "$RECOVERY_IMG"; fi
@@ -672,6 +775,12 @@ main() {
         logical="system system_ext product vendor odm mi_ext vendor_dlkm system_dlkm odm_dlkm"
     fi
     log "partisi logical base: $logical"
+    # tanpa vendor/odm dari base, ROM pasti tidak bisa boot -> hentikan di sini
+    for p in vendor odm; do
+        if [[ ! -f $B_IMG/$p.img ]]; then
+            die "base ROM tidak menghasilkan $p.img (super tidak ditemukan/tidak terbaca). Pakai fastboot ROM resmi marble (.tgz) atau OTA zip resmi (payload.bin). Lihat daftar 'isi ROM' di atas."
+        fi
+    done
 
     # ---------------- 2. PORT
     group_start "2/7 Port ROM (donor)"
@@ -703,8 +812,7 @@ main() {
     base_dev=$(get_prop "$B_FS/vendor/build.prop" ro.product.vendor.device)
     [[ -n $base_dev ]] || base_dev=$TARGET_DEVICE
     [[ $base_dev == "$TARGET_DEVICE" ]] || warn "base vendor device=$base_dev, bukan $TARGET_DEVICE - cek BASE_ROM!"
-    donor=$(get_prop "$P_FS/product/etc/build.prop" ro.product.product.device)
-    [[ -n $donor ]] || donor=$(get_prop "$P_FS/product/etc/build.prop" ro.product.product.name)
+    donor=$(detect_donor)
     port_ver=$(get_prop "$P_FS/mi_ext/etc/build.prop" ro.mi.os.version.incremental)
     [[ -n $port_ver ]] || port_ver=$(get_prop "$P_FS/product/etc/build.prop" ro.mi.os.version.incremental)
     [[ -n $port_ver ]] || port_ver=$(get_prop "$P_FS/system/system/build.prop" ro.build.version.incremental)
@@ -713,7 +821,10 @@ main() {
 
     # kompatibilitas: sepolicy mapping & VINTF
     local sver fcm
-    sver=$(tr -d '[:space:]' < "$B_FS/vendor/etc/selinux/plat_sepolicy_vers.txt" 2>/dev/null || true)
+    sver=""
+    if [[ -f $B_FS/vendor/etc/selinux/plat_sepolicy_vers.txt ]]; then
+        sver=$(tr -d '[:space:]' < "$B_FS/vendor/etc/selinux/plat_sepolicy_vers.txt")
+    fi
     if [[ -n $sver ]]; then
         if [[ -f $P_FS/system/system/etc/selinux/mapping/$sver.cil ]]; then ok "sepolicy mapping $sver.cil ada"
         else warn "system donor TIDAK punya selinux/mapping/$sver.cil -> kemungkinan besar bootloop"; fi
@@ -725,6 +836,7 @@ main() {
     fi
 
     patch_props "$donor" "$base_dev"
+    report_app_sizes
     patch_port_resources
     apply_device_files
     rm -rf "${B_FS:?}/product" "$B_FS/config/product_"*
@@ -752,7 +864,6 @@ main() {
         else
             log "repack base $p (erofs)"; repack_erofs "$B_FS" "$p" "$OUT_IMG_TMP/$p.img"
         fi
-        rm -rf "${B_FS:?}/$p"
     done
     # partisi logical base lain dipakai apa adanya (vendor_dlkm, system_dlkm, ...)
     for p in $logical; do
@@ -760,6 +871,8 @@ main() {
         if [[ -f $B_IMG/$p.img ]]; then mv "$B_IMG/$p.img" "$OUT_IMG_TMP/$p.img"; log "pakai base apa adanya: $p"; fi
     done
     for p in $logical; do rm -f "$B_IMG/$p.img"; done
+    fit_super
+    rm -rf "${B_FS:?}/vendor" "${B_FS:?}/odm"
     ls -la "$OUT_IMG_TMP"; dfree
     group_end
 
