@@ -223,4 +223,3 @@ jobs:
             echo "| Debug ADB | ${DEBUG_ADB} |"
             echo "| Format super | ${RECOVERY_SUPER} |"
           } >> "$GITHUB_STEP_SUMMARY"
-          
