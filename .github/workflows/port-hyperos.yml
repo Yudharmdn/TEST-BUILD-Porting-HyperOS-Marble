@@ -1,24 +1,25 @@
 name: Port HyperOS -> marble (Recovery)
 
 # Quick-port HyperOS dari device donor ke POCO F5 (marble).
-# Base (firmware, boot, vendor_boot, dtbo, vendor, odm, *_dlkm) = ROM resmi marble
-# Port (system, system_ext, product, mi_ext)                   = ROM donor HyperOS
-# Output: zip flashable recovery (OrangeFox/TWRP):
-#   META-INF/com/google/android/update-binary + images/*.img (+ super.img)
+# Base (firmware, vendor_boot, dtbo, vendor, odm, vendor_dlkm) = zip xiaomi.eu marble
+# Port (system, system_ext, product, mi_ext)                   = OTA ROM donor HyperOS
+# boot.img = kernel custom (BOOT_IMG), recovery.img tidak ikut.
+# Output: zip flashable recovery (OrangeFox), susunan sama dengan zip xiaomi.eu:
+#   META-INF/ (installer xiaomi.eu, cuma flash, tanpa wipe) + images/*.img + images/super.img.0..8
 
 on:
   workflow_dispatch:
     inputs:
       base_rom_url:
-        description: "URL ROM resmi marble (fastboot .tgz disarankan, atau OTA .zip)"
+        description: "URL zip xiaomi.eu marble (zip recovery; META-INF & firmware-nya dipakai)"
         required: true
         type: string
       port_rom_url:
-        description: "URL ROM donor HyperOS (OTA .zip berisi payload.bin, contoh HyperOS4.0.0.24.XPKCNXM)"
+        description: "URL OTA full ROM donor HyperOS A16/A17 (.zip berisi payload.bin)"
         required: true
         type: string
       super_size:
-        description: "Ukuran super (byte). auto = baca dari super.img base fastboot"
+        description: "Ukuran partisi super (byte). marble = 9663676416. auto = baca dari metadata super ROM base"
         required: false
         default: "9663676416"
         type: string
@@ -28,7 +29,7 @@ on:
         default: "vendor odm"
         type: string
       debloat:
-        description: "Path yang dihapus dari port, pisah spasi (mis. product/app/Foo)"
+        description: "Debloat tambahan: package / folder / path, pisah spasi (mis. product/app/Foo)"
         required: false
         default: ""
         type: string
@@ -74,11 +75,11 @@ env:
   EXT4_HEADROOM_MB: "128"
   VNDK_COMPAT: "true"          # vendor butuh VNDK APEX versi lama -> salin dari ROM base
   LINKER_CHECK: "true"         # laporan dependensi linker ELF vendor/odm (info)
-  VINTF_COMPAT: "true"         # FCM level vendor tak dikenal donor -> salin compatibility_matrix dari system base
+  VINTF_COMPAT: "true"         # FCM level vendor tak dikenal donor -> salin compatibility_matrix.<lv>.xml dari system base ke /system/etc/vintf port
   PROP_MERGE: "true"           # salin props khas device dari product/etc/build.prop base marble
   OVERLAY_FIX: "true"          # buang overlay khas donor, salin overlay khas marble
   INSTALLER: base               # base = pakai META-INF ROM base (xiaomi.eu) | ours = installer buatan script
-  RECOVERY_SUPER: raw          # raw = images/super.img | zst = images/super.img.zst (zip lebih kecil)
+  RECOVERY_SUPER: raw          # hanya INSTALLER=ours. Mode base: super mengikuti layout zip base (super.img.0..8 sparse)
   # boot.img custom (kernel melt-rebase) menggantikan boot.img base; kosongkan untuk pakai boot base
   BOOT_IMG: https://github.com/Yudharmdn/boot-melt-rebase/releases/download/boot-melt-rebase/boot.img
   # Gboard sebagai keyboard sistem (product/app/LatinImeGoogle); kosongkan untuk tidak menambah
@@ -261,7 +262,7 @@ jobs:
             echo "| Encryption off | ${DISABLE_ENCRYPTION} |"
             echo "| RW | ${RW_MOUNT} |"
             echo "| Debug ADB | ${DEBUG_ADB} |"
-            echo "| Format super | ${RECOVERY_SUPER} |"
+            echo "| Installer | ${INSTALLER} |"
             if ls out/*.sha256 >/dev/null 2>&1; then
               echo
               echo "SHA256: \`$(cut -d' ' -f1 out/*.sha256 | head -n1)\`"
