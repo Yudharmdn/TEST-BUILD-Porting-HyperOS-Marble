@@ -74,6 +74,8 @@ env:
   EXT4_HEADROOM_MB: "128"
   RECOVERY_SUPER: raw          # raw = images/super.img | zst = images/super.img.zst (zip lebih kecil)
   REPLACE_FROM_BASE: "device_features displayconfig overlay camera"
+  DEBLOAT_PRESET: safe         # safe = hapus semua data-app (preinstall yang bisa di-uninstall) | none
+  FIT_FALLBACK_EROFS: "true"   # super tidak muat -> vendor/odm otomatis EROFS
   ZIP_LEVEL: "1"
   TOOLKIT_REPO: toraidl/hyperos_port
   TOOLKIT_SHA: 523b0f6378e77e9e93ba6e15a064f45b26274eab
