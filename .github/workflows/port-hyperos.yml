@@ -73,8 +73,10 @@ env:
   EROFS_COMP: "lz4hc,9"
   EXT4_HEADROOM_MB: "128"
   RECOVERY_SUPER: raw          # raw = images/super.img | zst = images/super.img.zst (zip lebih kecil)
+  # boot.img custom (kernel melt-rebase) menggantikan boot.img base; kosongkan untuk pakai boot base
+  BOOT_IMG: https://github.com/Yudharmdn/boot-melt-rebase/releases/download/boot-melt-rebase/boot.img
   REPLACE_FROM_BASE: "device_features displayconfig overlay camera"
-  DEBLOAT_PRESET: safe         # safe = hapus semua data-app (preinstall yang bisa di-uninstall) | none
+  DEBLOAT_PRESET: none         # debloat hanya dari debloat_packages.txt (safe = + hapus semua data-app)
   DEBLOAT_SAFE_KEEP: "MIUIGallery"   # folder data-app yang dipertahankan (pisah spasi)
   FIT_FALLBACK_EROFS: "true"   # super tidak muat -> vendor/odm otomatis EROFS
   ZIP_LEVEL: "1"
@@ -254,4 +256,3 @@ jobs:
             echo "| Debug ADB | ${DEBUG_ADB} |"
             echo "| Format super | ${RECOVERY_SUPER} |"
           } >> "$GITHUB_STEP_SUMMARY"
-          
