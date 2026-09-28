@@ -48,6 +48,7 @@ com.miui.notes                                | Notes
 com.xiaomi.joyose                             | Joyose (profil performa/thermal game)
 com.xiaomi.midrop                             | Mi Drop / ShareMe
 com.xiaomi.scanner                            | Scanner
+com.iflytek.inputmethod.miui                  | keyboard iFlytek (Gboard jadi default)
 
 # ---- Facebook
 com.facebook.appmanager                       | Facebook App Manager
@@ -75,7 +76,6 @@ DownloadProviderUi                         | aplikasi Downloads (provider tetap 
 PersonalAssistant                          | App Vault / widget kiri home
 TouchAssistant                             | Quick Ball
 CloudBackup
-MiCloudSync
 FindDevice                                 | Find Device
 Mirror                                     | Xiaomi screen mirroring
 MiLinkService                              | HyperConnect / cast
