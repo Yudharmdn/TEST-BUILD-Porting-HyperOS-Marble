@@ -75,6 +75,7 @@ env:
   RECOVERY_SUPER: raw          # raw = images/super.img | zst = images/super.img.zst (zip lebih kecil)
   REPLACE_FROM_BASE: "device_features displayconfig overlay camera"
   DEBLOAT_PRESET: safe         # safe = hapus semua data-app (preinstall yang bisa di-uninstall) | none
+  DEBLOAT_SAFE_KEEP: "MIUIGallery"   # folder data-app yang dipertahankan (pisah spasi)
   FIT_FALLBACK_EROFS: "true"   # super tidak muat -> vendor/odm otomatis EROFS
   ZIP_LEVEL: "1"
   TOOLKIT_REPO: toraidl/hyperos_port
@@ -253,3 +254,4 @@ jobs:
             echo "| Debug ADB | ${DEBUG_ADB} |"
             echo "| Format super | ${RECOVERY_SUPER} |"
           } >> "$GITHUB_STEP_SUMMARY"
+          
