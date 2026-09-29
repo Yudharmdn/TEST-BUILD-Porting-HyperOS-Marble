@@ -68,6 +68,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sku", default="")
     ap.add_argument("--map", action="append", default=[])
+    ap.add_argument("--get", default="", help="cetak nilai efektif satu key saja")
     ap.add_argument("files", nargs="+")
     a = ap.parse_args()
     maps = dict(m.split("=", 1) for m in a.map)
@@ -75,6 +76,10 @@ def main():
     for item in a.files:
         label, path = item.split("=", 1)
         load(path, label, props, src, maps, a.sku, seen)
+
+    if a.get:
+        print(props.get(a.get, ""))
+        return 0
 
     # ro.product.device: diturunkan init dari ro.product.<partisi>.device (urutan product,odm,vendor,system_ext,system)
     if "ro.product.device" not in props:

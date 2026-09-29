@@ -592,17 +592,24 @@ detect_donor() {
     done
     echo ""
 }
+base_hw_prop() { # key -> nilai efektif di vendor+odm base (ikut import SKU odm)
+    python3 "$SCRIPT_DIR/prop_effective.py" --sku "$TARGET_DEVICE" --map "/odm=$B_FS/odm" --map "/vendor=$B_FS/vendor" \
+        --get "$1" vendor="$B_FS/vendor/build.prop" odm="$B_FS/odm/etc/build.prop" 2>/dev/null || true
+}
+
 patch_props() {
     local donor=$1 base=$2 f model brand market dens dens2
-    model=$(get_prop "$B_FS/vendor/build.prop" ro.product.vendor.model)
-    brand=$(get_prop "$B_FS/vendor/build.prop" ro.product.vendor.brand)
-    market=$(get_prop "$B_FS/vendor/build.prop" ro.product.vendor.marketname)
+    # nilai efektif vendor + odm (termasuk file SKU odm, mis. model 23049PCD8G / POCO F5)
+    model=$(base_hw_prop ro.product.vendor.model)
+    brand=$(base_hw_prop ro.product.vendor.brand)
+    market=$(base_hw_prop ro.product.vendor.marketname)
     for f in "$P_FS"/system/system/build.prop "$P_FS"/system_ext/etc/build.prop \
              "$P_FS"/product/etc/build.prop "$P_FS"/mi_ext/etc/build.prop; do
         [[ -f $f ]] || continue
         log "props: ${f#"$P_FS"/}"
         if [[ -n $donor && $donor != "$base" ]]; then
-            sed -i -E "/^(ro\.product\.[a-z_]*\.(device|name)|ro\.build\.product|ro\.product\.mod_device|ro\.product\.board)=/ s/\b${donor}\b/${base}/g" "$f"
+            # batas nama: bukan huruf/angka (garis bawah ikut dihitung, mis. flourite_xiaomieu_global)
+            sed -i -E "/^(ro\.product\.[a-z_]*\.(device|name)|ro\.build\.product|ro\.product\.mod_device|ro\.product\.board)=/ s/(^[^=]*=|[^A-Za-z0-9])${donor}([^A-Za-z0-9]|\$)/\1${base}\2/g" "$f"
         fi
         if [[ -n $model ]]; then
             sed -i -E "s/^(ro\.product\.(system|system_ext|product|odm)\.model)=.*/\1=${model//\//\\/}/" "$f"
@@ -640,6 +647,36 @@ props_effective() {
         | sed -n 's/^[[:space:]]*\([A-Za-z0-9_.-]*\)=.*/\1/p' \
         | grep -E '^(ro\.product\.vendor\.|ro\.vendor\.)' | sort -u || true)
     vkeys+=" $PROPS_HW_FIXED"
+    # identitas product sama dengan ROM base (HyperOS baru: ro.product.product.device bisa 'miproduct'
+    # atau codename; ro.product.device diturunkan dari sini)
+    local bp="$B_FS/product/etc/build.prop" pp="$P_FS/product/etc/build.prop" v
+    if [[ -f $bp && -f $pp ]]; then
+        for k in ro.product.product.device ro.product.product.name ro.product.product.model ro.product.product.brand \
+                 ro.product.product.manufacturer ro.product.product.marketname ro.product.property_source_order; do
+            v=$(get_prop "$bp" "$k")
+            if [[ -n $v && $(get_prop "$pp" "$k") != "$v" ]]; then
+                log "props: $k = $v (sama dengan product base)"
+                set_prop "$pp" "$k" "$v"
+            fi
+        done
+    fi
+    # props yang diisi vendor/odm tapi ditimpa product/mi_ext DONOR (base product tidak menimpanya):
+    # buang, supaya nilainya sama seperti di marble stock (mis. aaudio.mmap_policy, ringtone)
+    local allv bk
+    allv=$(cat "$B_FS/vendor/build.prop" "$B_FS"/odm/etc/*build.prop 2>/dev/null \
+        | sed -n 's/^[[:space:]]*\([A-Za-z0-9_.-]*\)=.*/\1/p' | sort -u || true)
+    bk=$(sed -n 's/^[[:space:]]*\([A-Za-z0-9_.-]*\)=.*/\1/p' "$bp" 2>/dev/null | sort -u || true)
+    for f in "$pp" "$P_FS/mi_ext/etc/build.prop"; do
+        [[ -f $f ]] || continue
+        for k in $(comm -23 <(printf '%s\n' "$allv") <(printf '%s\n' "$bk")); do
+            [[ $k == ro.product.first_api_level ]] && continue
+            if grep -q "^${k//./\\.}=" "$f"; then
+                sed -i "/^${k//./\\.}=/d" "$f"
+                log "props: $k dihapus dari ${f#"$P_FS"/} (marble stock memakai nilai vendor/odm)"
+                n=$((n + 1))
+            fi
+        done
+    done
     for f in "$P_FS/system/system/build.prop" "$P_FS/system_ext/etc/build.prop" "$P_FS/product/etc/build.prop" "$P_FS/mi_ext/etc/build.prop"; do
         [[ -f $f ]] || continue
         for k in $vkeys; do
