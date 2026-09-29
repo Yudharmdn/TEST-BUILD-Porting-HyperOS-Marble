@@ -23,14 +23,14 @@ After merging them, `scripts/port.sh` patches the parts that usually stop a port
 - **fstab and vbmeta:** `/data` encryption is removed, vendor/odm can be mounted rw, and verity is disabled.
 - **Keyboard:** Gboard is added as a system app, and the Chinese keyboards (Sogou, Baidu, iFlytek) are removed. With no other keyboard left, Gboard becomes the default on its own.
 - **Debloat:** unneeded apps are removed based on `debloat_packages.txt`.
-- **boot.img:** replaced with a custom kernel (melt).
+- **boot.img:** the stock marble kernel from the base ROM is used by default (`BOOT_IMG: ""` in the workflow), which is the safest choice for a first flash. Put a URL in `BOOT_IMG` to use a custom kernel instead. The build then checks that it still has a ramdisk (marble has no init_boot, so first-stage init lives there) and that the kernel is the same 5.10 series as the base, since the modules in vendor_boot and vendor_dlkm are built for it.
 
 ## What's inside the zip
 
 ```
 META-INF/                 installer from xiaomi.eu
 images/abl.img ... xbl_ramdump.img   marble firmware
-images/boot.img           custom kernel
+images/boot.img           kernel (stock by default)
 images/vendor_boot.img    patched (fstab)
 images/dtbo.img
 images/vbmeta.img, vbmeta_system.img
@@ -83,7 +83,8 @@ Updating later to a newer build made with the same settings usually doesn't need
 
 Some apps are removed through `debloat_packages.txt`, so a few things are on you:
 
-- **Browser:** there is none (MIUIBrowser is removed and the Chinese donor ROM doesn't ship Chrome). Have a Chrome or other browser APK ready.
+- **Browser:** there is none. Xiaomi's browser is on the debloat list and the donor ROMs used so far don't ship Chrome. Have a Chrome or other browser APK ready.
+- **Google apps:** whatever the donor ships stays. xiaomi.eu donors come with Play Store and Play Services, official Chinese OTAs usually don't. The build log lists them under `Google:`.
 - **NFC:** disabled (`NQNfcNci` is removed). If you need NFC, delete that line from `debloat_packages.txt` and rebuild.
 - **Other things that are gone:** Print, SIM Toolkit, the QR Scanner, Find Device, and Joyose (game profiles).
 
@@ -140,6 +141,7 @@ scripts/port.sh                      the whole porting process lives here
 scripts/lp_tool.py                   reads super & payload.bin metadata
 scripts/fstab_patch.py               patches fstab
 scripts/prop_merge.py                merges marble props into the port
+scripts/prop_effective.py            shows which props actually apply at boot (init load order)
 scripts/vintf_check.py               checks VINTF, vendor vs framework
 scripts/linker_check.py              checks the libraries vendor needs
 scripts/installer_sanitize.py        makes sure the installer never wipes data
