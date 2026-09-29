@@ -631,6 +631,58 @@ patch_props() {
     fi
 }
 
+# props milik hardware (diisi vendor/odm marble) tidak boleh ditimpa build.prop donor:
+# init memuat system -> system_ext -> vendor -> odm -> product -> mi_ext, yang belakangan menang.
+PROPS_HW_FIXED="ro.product.board ro.board.platform ro.vndk.version"
+props_effective() {
+    local vkeys k f n=0 files=() lbl
+    vkeys=$(cat "$B_FS/vendor/build.prop" "$B_FS"/odm/etc/*build.prop 2>/dev/null \
+        | sed -n 's/^[[:space:]]*\([A-Za-z0-9_.-]*\)=.*/\1/p' \
+        | grep -E '^(ro\.product\.vendor\.|ro\.vendor\.)' | sort -u || true)
+    vkeys+=" $PROPS_HW_FIXED"
+    for f in "$P_FS/system/system/build.prop" "$P_FS/system_ext/etc/build.prop" "$P_FS/product/etc/build.prop" "$P_FS/mi_ext/etc/build.prop"; do
+        [[ -f $f ]] || continue
+        for k in $vkeys; do
+            if grep -q "^${k//./\\.}=" "$f"; then
+                sed -i "/^${k//./\\.}=/d" "$f"
+                log "props: $k dihapus dari ${f#"$P_FS"/} (nilai vendor/odm marble yang dipakai)"
+                n=$((n + 1))
+            fi
+        done
+    done
+    # ro.product.first_api_level = Android saat HP rilis. Nilai donor (mis. 35) membuat framework
+    # menganggap marble device baru dan menuntut fitur vendor yang tidak ada -> pakai nilai marble.
+    local bfal pfal pp="$P_FS/product/etc/build.prop"
+    bfal=$(get_prop "$B_FS/product/etc/build.prop" ro.product.first_api_level)
+    [[ -n $bfal ]] || bfal=$(get_prop "$B_FS/vendor/build.prop" ro.product.first_api_level)
+    if [[ -n $bfal && -f $pp ]]; then
+        pfal=$(cat "$P_FS/system/system/build.prop" "$P_FS/system_ext/etc/build.prop" "$pp" 2>/dev/null \
+            | sed -n 's/^ro\.product\.first_api_level=//p' | tail -n1)
+        for f in "$P_FS/system/system/build.prop" "$P_FS/system_ext/etc/build.prop" "$P_FS/mi_ext/etc/build.prop"; do
+            if [[ -f $f ]]; then sed -i '/^ro\.product\.first_api_level=/d' "$f"; fi
+        done
+        set_prop "$pp" ro.product.first_api_level "$bfal"
+        if [[ -n $pfal && $pfal != "$bfal" ]]; then
+            ok "props: ro.product.first_api_level $pfal (donor) -> $bfal (marble)"
+        fi
+    fi
+    files=(system="$P_FS/system/system/build.prop" system_ext="$P_FS/system_ext/etc/build.prop"
+           vendor="$B_FS/vendor/build.prop" odm="$B_FS/odm/etc/build.prop"
+           product="$P_FS/product/etc/build.prop" mi_ext="$P_FS/mi_ext/etc/build.prop")
+    python3 "$SCRIPT_DIR/prop_effective.py" --sku "$TARGET_DEVICE" --map "/odm=$B_FS/odm" --map "/vendor=$B_FS/vendor" \
+        "${files[@]}" > "$WORK/prop_effective.log" 2>&1 || true
+    log "props yang berlaku saat boot (urutan load init):"
+    while IFS= read -r lbl; do
+        case $lbl in RESULT*) ;; *) printf '    %s\n' "${lbl#KEY  }" ;; esac
+    done < "$WORK/prop_effective.log"
+    if grep -q '^OVERRIDE !!' "$WORK/prop_effective.log"; then
+        warn "props: masih ada props hardware vendor/odm yang ditimpa partisi donor (baris OVERRIDE !!)"
+    else
+        if [[ $n -gt 0 ]]; then ok "props: semua props hardware (vendor/odm) memakai nilai marble, $n baris donor dibuang"
+        else ok "props: semua props hardware (vendor/odm) memakai nilai marble"; fi
+    fi
+}
+
 first_existing() { # root rel... -> rel pertama yang ada
     local root=$1 r; shift
     for r in "$@"; do
@@ -772,6 +824,7 @@ patch_port_resources() {
     done < <(debloat_tokens | grep -v '^!' | grep '/' | sort -u || true)
 
     check_ime_left
+    report_google
 }
 
 # Gboard sebagai aplikasi sistem. Jadi keyboard default kalau keyboard sistem lain
@@ -812,6 +865,24 @@ PY
 )
     log "Gboard: $n library native diekstrak ke $GBOARD_DIR/lib"
     ok "Gboard: $pkg -> $GBOARD_DIR/$name.apk ($(( $(stat -c%s "$src") / 1048576 )) MB)"
+}
+
+# info: aplikasi Google yang ada di ROM hasil port (ROM donor CN biasanya tanpa Play Store/GMS lengkap)
+report_google() {
+    local list core p have=""
+    list=$(python3 "$SCRIPT_DIR/apk_index.py" "$P_FS" | awk -F'\t' '$1 ~ /^com\.google\.|^com\.android\.vending$/ {print $1"\t"$2}' | sort -u || true)
+    for core in com.google.android.gms com.google.android.gsf com.android.vending; do
+        if grep -q "^$core"$'\t' <<< "$list"; then have+=" $core"; fi
+    done
+    if [[ -n $list ]]; then
+        log "Google: aplikasi Google di ROM port:"
+        while IFS=$'\t' read -r p d; do printf '    %-45s %s\n' "$p" "$d"; done <<< "$list"
+    else
+        log "Google: tidak ada aplikasi Google di ROM port"
+    fi
+    for core in com.google.android.gms com.google.android.gsf com.android.vending; do
+        in_list "$core" "$have" || warn "Google: $core tidak ada -> Play Store/login Google perlu dipasang sendiri setelah boot"
+    done
 }
 
 # peringatan kalau semua keyboard terhapus (setup awal butuh keyboard untuk password Wi-Fi)
@@ -1127,8 +1198,52 @@ replace_boot() { # path boot.img base di paket
         fi
     fi
     hv=$(od -An -tu4 -j40 -N4 "$src" | tr -d ' ')
+    if [[ -f $dst ]]; then boot_compat "$dst" "$src"; fi
     cp -f "$src" "$dst"
     ok "boot.img diganti: ${BOOT_IMG##*/} ($(( ssz / 1048576 )) MB, header v$hv)"
+}
+
+boot_ramdisk_size() { # boot.img -> ukuran ramdisk (byte) dari header
+    local hv off
+    hv=$(od -An -tu4 -j40 -N4 "$1" | tr -d ' ')
+    if [[ $hv -ge 3 ]]; then off=12; else off=16; fi
+    od -An -tu4 -j"$off" -N4 "$1" | tr -d ' '
+}
+
+boot_kver() { # boot.img -> "5.10.xxx-android12-9-..." (kosong kalau tidak terbaca)
+    local d img
+    img=$(realpath "$1")
+    d=$(mktemp -d "$WORK/kv.XXXX")
+    (cd "$d" && magiskboot unpack "$img" >/dev/null 2>&1) || true
+    if [[ -f $d/kernel ]]; then
+        strings -a "$d/kernel" | grep -m1 -oE 'Linux version [0-9]+\.[0-9]+\.[0-9]+[^ ]*' | sed 's/^Linux version //' || true
+    fi
+    rm -rf "$d"
+}
+
+# boot.img custom harus punya ramdisk (first-stage init, marble tidak punya init_boot) dan
+# versi kernel mayor.minor sama dengan base: modul kernel di vendor_boot & vendor_dlkm
+# dibuat untuk kernel base. Beda -> modul gagal load / tidak ada init -> bootloop.
+boot_compat() { # base.img custom.img
+    local base=$1 new=$2 rb rn kb kn
+    rb=$(boot_ramdisk_size "$base"); rn=$(boot_ramdisk_size "$new")
+    if [[ ${rb:-0} -gt 0 && ${rn:-0} -eq 0 ]]; then
+        die "boot.img custom TIDAK punya ramdisk (base punya ${rb} byte). marble tidak punya init_boot, jadi first-stage init ada di ramdisk boot -> pasti bootloop. Pakai boot.img lengkap, bukan kernel-only"
+    fi
+    log "boot: ramdisk base ${rb:-?} byte, custom ${rn:-?} byte"
+    kb=$(boot_kver "$base"); kn=$(boot_kver "$new")
+    log "boot: kernel base   ${kb:-tidak terbaca}"
+    log "boot: kernel custom ${kn:-tidak terbaca}"
+    if [[ -n $kb && -n $kn ]]; then
+        if [[ $(cut -d. -f1,2 <<< "$kb") != "$(cut -d. -f1,2 <<< "$kn")" ]]; then
+            die "versi kernel custom (${kn%%-*}) beda seri dengan base (${kb%%-*}). Modul di vendor_boot/vendor_dlkm tidak akan load -> bootloop"
+        fi
+        if [[ ${kb%%-*} != "${kn%%-*}" ]]; then
+            warn "sublevel kernel beda (base ${kb%%-*}, custom ${kn%%-*}). GKI biasanya tetap load modul vendor, tapi kalau layar/touch mati setelah boot, cek dmesg 'disagrees about version'"
+        fi
+    else
+        warn "versi kernel tidak bisa dibaca dari salah satu boot.img, kecocokan kernel tidak dicek"
+    fi
 }
 
 # ------------------------------------------------------------------ installer base (xiaomi.eu)
@@ -1333,6 +1448,12 @@ main() {
             die "super_size $SUPER_SIZE bukan kelipatan 4096. Pakai 'auto', atau angka persis dari: adb shell su -c 'blockdev --getsize64 /dev/block/by-name/super'"
         fi
     fi
+    # kernel marble 5.10: driver EROFS hanya bisa baca LZ4 (lz4 & lz4hc menghasilkan format yang sama).
+    # lzma butuh kernel 5.16+, deflate 6.6+, zstd 6.10+ -> partisi gagal mount -> bootloop
+    case ${EROFS_COMP%%,*} in
+        lz4|lz4hc) ;;
+        *) die "EROFS_COMP '${EROFS_COMP}' tidak bisa dibaca kernel 5.10 marble (partisi gagal mount = bootloop). Pakai lz4hc atau lz4" ;;
+    esac
     check_url BASE_ROM "$BASE_ROM"
     check_url PORT_ROM "$PORT_ROM"
     if [[ -n $RECOVERY_IMG ]]; then check_url RECOVERY_IMG "$RECOVERY_IMG"; fi
@@ -1430,6 +1551,7 @@ main() {
     DEBLOAT_KEEP=$(debloat_keep)
     if is_true "$PROP_MERGE"; then merge_device_props; fi
     patch_props "$donor" "$base_dev"
+    props_effective
     if is_true "$OVERLAY_FIX"; then fix_overlays "$donor" "$base_dev"; fi
     report_app_sizes
     patch_port_resources
