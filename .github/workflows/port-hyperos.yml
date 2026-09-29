@@ -200,7 +200,7 @@ jobs:
           # archive: false -> file zip ROM di-upload apa adanya; nama artifact = nama file zip
           path: ${{ steps.port.outputs.zip }}
           archive: false
-          retention-days: 7
+          retention-days: 90
           if-no-files-found: error
 
       - name: Upload ke GitHub Release
