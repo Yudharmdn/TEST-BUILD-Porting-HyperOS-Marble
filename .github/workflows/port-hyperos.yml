@@ -85,7 +85,9 @@ env:
   # Gboard sebagai keyboard sistem (product/app/LatinImeGoogle); kosongkan untuk tidak menambah
   GBOARD_APK: https://github.com/Yudharmdn/boot-melt-rebase/releases/download/boot-melt-rebase/LatinImeGoogle.apk
   GBOARD_PACKAGE: com.charlie.android.inputmethod.latin
-  REPLACE_FROM_BASE: "device_features displayconfig overlay camera"
+  # dari ROM base: overlay = Devices* + Aosp/Miui framework, Settings, biometrik, telephony (seperti toraidl)
+  REPLACE_FROM_BASE: "device_features displayconfig overlay camera misound biometric"
+  EU_SYSTEMSERVER_PATCH: "true"  # donor xiaomi.eu: kosongkan constructor SystemServerImpl (miui-services.jar), seperti toraidl
   DEBLOAT_PRESET: none         # debloat hanya dari debloat_packages.txt (safe = + hapus semua data-app)
   DEBLOAT_SAFE_KEEP: "MIUIGallery"   # folder data-app yang dipertahankan (pisah spasi)
   FIT_FALLBACK_EROFS: "true"   # super tidak muat -> vendor/odm otomatis EROFS
@@ -117,8 +119,9 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2 zstd zip unzip e2fsprogs python3 >/dev/null
+          sudo apt-get install -y -qq aria2 zstd zip unzip e2fsprogs python3 default-jre-headless >/dev/null
           aria2c --version | head -n1
+          java -version 2>&1 | head -n1
 
       - name: Ambil toolkit (pinned)
         run: |
@@ -126,7 +129,7 @@ jobs:
           git init -q toolkit
           cd toolkit
           git remote add origin "https://github.com/${TOOLKIT_REPO}.git"
-          git sparse-checkout set --no-cone '/bin/Linux/x86_64/' '/bin/*.py' '/bin/imgextractor/' '/bin/flash/zstd'
+          git sparse-checkout set --no-cone '/bin/Linux/x86_64/' '/bin/*.py' '/bin/imgextractor/' '/bin/flash/zstd' '/bin/apktool/'
           git fetch -q --depth 1 --filter=blob:none origin "$TOOLKIT_SHA"
           git checkout -q FETCH_HEAD
           chmod +x bin/Linux/x86_64/*
