@@ -17,6 +17,9 @@ After merging them, `scripts/port.sh` patches the parts that usually stop a port
 
 - **Props:** build.prop is adjusted for marble (codename, model, density, and the audio/bluetooth/etc. props from the base).
 - **Device files:** `device_features`, `displayconfig`, the device overlays and MiuiCamera are taken from marble, not the donor. The camera's privileged-permission allowlist from marble is copied along with it, otherwise system_server can refuse to boot.
+- **More pieces from marble** (the same list [toraidl/hyperos_port](https://github.com/toraidl/hyperos_port) uses): the framework, MIUI framework, Settings, biometric and telephony overlays, which carry the brightness range, camera cutout, rounded corners and fingerprint sensor position, plus MiSound (audio effects tied to the vendor Dolby HAL) and the face unlock app.
+- **Updater removed:** the donor's updater app would offer OTAs built for another phone, and installing one on marble can brick it.
+- **xiaomi.eu donors:** like toraidl, the constructor of `SystemServerImpl` in `miui-services.jar` is emptied so it only calls its parent class, and `device_info.json` comes from marble. The original constructor is printed in the build log so you can see what was removed.
 - **VINTF:** the marble vendor is FCM level 6 (Android 12), which Android 17 no longer knows about. The script copies `compatibility_matrix.6.xml` from the base system into `/system/etc/vintf/` of the port (that's the framework side, the VINTF files in `/vendor` and `/odm` are left untouched). It also checks the other direction, making sure everything the vendor's matrix asks for is provided by the framework.
 - **VNDK:** the VNDK v32 APEX is copied from the base into `/system_ext/apex`, and `vendor-ndk 32` is declared in a framework manifest fragment, since newer Android donors don't ship either anymore.
 - **Linker:** every library the vendor/odm binaries need is checked one by one, and the result shows up in the log.
@@ -142,6 +145,7 @@ scripts/lp_tool.py                   reads super & payload.bin metadata
 scripts/fstab_patch.py               patches fstab
 scripts/prop_merge.py                merges marble props into the port
 scripts/prop_effective.py            shows which props actually apply at boot (init load order)
+scripts/jar_smali_patch.py           patches SystemServerImpl in miui-services.jar (xiaomi.eu donors)
 scripts/vintf_check.py               checks VINTF, vendor vs framework
 scripts/linker_check.py              checks the libraries vendor needs
 scripts/installer_sanitize.py        makes sure the installer never wipes data
