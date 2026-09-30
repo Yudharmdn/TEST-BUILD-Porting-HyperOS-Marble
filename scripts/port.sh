@@ -24,7 +24,7 @@ RW_MOUNT=${RW_MOUNT:-true}
 DISABLE_AVB=${DISABLE_AVB:-true}
 DEBUG_ADB=${DEBUG_ADB:-true}
 SUPER_SIZE=${SUPER_SIZE:-auto}
-REPLACE_FROM_BASE=${REPLACE_FROM_BASE:-"device_features displayconfig overlay camera"}
+REPLACE_FROM_BASE=${REPLACE_FROM_BASE:-"device_features displayconfig overlay camera misound biometric"}
 DEBLOAT=${DEBLOAT:-""}
 EROFS_COMP=${EROFS_COMP:-"lz4hc,9"}
 EXT4_HEADROOM_MB=${EXT4_HEADROOM_MB:-128}
@@ -791,6 +791,98 @@ PY
     fi
 }
 
+# overlay konfigurasi device lain (toraidl/hyperos_port): isi resource framework/Settings/biometrik
+# khas hardware (kecerahan, cutout kamera, sudut layar, sensor sidik jari). Diganti versi base kalau
+# keduanya ada. Telephony: disalin dari base, atau dibuang kalau base tidak punya.
+OVERLAYS_FROM_BASE="AospFrameworkResOverlay MiuiFrameworkResOverlay SettingsRroDeviceHideStatusBarOverlay MiuiBiometricResOverlay"
+overlays_from_base() {
+    local f b p
+    for f in $OVERLAYS_FROM_BASE; do
+        b=$(find "$B_FS/product" -type f -name "$f.apk" 2>/dev/null | head -n1)
+        p=$(find "$P_FS/product" -type f -name "$f.apk" 2>/dev/null | head -n1)
+        if [[ -n $b && -n $p ]]; then
+            cp -f "$b" "$p"; ok "overlay dari base: $f.apk"
+        elif [[ -n $p ]]; then
+            log "overlay: $f.apk tidak ada di base, punya donor dipertahankan"
+        fi
+    done
+    b=$(find "$B_FS/product" -type f -name "MiuiFrameworkTelephonyResOverlay.apk" 2>/dev/null | head -n1)
+    p=$(find "$P_FS/product" -type f -name "MiuiFrameworkTelephonyResOverlay.apk" 2>/dev/null | head -n1)
+    if [[ -n $b ]]; then
+        cp -f "$b" "${p:-$P_FS/product/overlay/MiuiFrameworkTelephonyResOverlay.apk}"
+        ok "overlay dari base: MiuiFrameworkTelephonyResOverlay.apk"
+    elif [[ -n $p ]]; then
+        rm -f "$p"; ok "overlay: MiuiFrameworkTelephonyResOverlay.apk donor dibuang (base tidak punya)"
+    fi
+}
+
+# app_from_base <pola nama folder>: folder app di product base menggantikan milik donor
+# (toraidl: MiSound = efek audio/Dolby yang terikat HAL vendor, *Biometric* = face unlock).
+app_from_base() {
+    local pat=$1 b p rel
+    b=$(find "$B_FS/product" -mindepth 2 -maxdepth 2 -type d -path "$B_FS/product/*app/*" -name "$pat" 2>/dev/null | head -n1)
+    if [[ -z $b ]]; then log "$pat: tidak ada di base, punya donor dipertahankan"; return 0; fi
+    p=$(find "$P_FS/product" -mindepth 2 -maxdepth 2 -type d -path "$P_FS/product/*app/*" -name "$pat" 2>/dev/null | head -n1)
+    rel=${b#"$B_FS"/}
+    if [[ -n $p ]]; then rm -rf "$p"; fi
+    mkdir -p "$P_FS/$(dirname "$rel")"
+    cp -a "$b" "$P_FS/$rel"
+    ok "$(basename "$b"): dari base $rel${p:+ (menggantikan ${p#"$P_FS"/})}"
+    base_privapp_perms "$rel"
+}
+
+# aplikasi Updater bawaan donor menawarkan OTA untuk ROM/device lain -> kalau di-install
+# di marble hasilnya bisa brick. Selalu dibuang (toraidl: Updater, MiuiUpdater).
+remove_updater() {
+    local d n=0
+    while IFS= read -r -d '' d; do
+        rm -rf "$d"; n=$((n + 1))
+        ok "updater: ${d#"$P_FS"/} dihapus (OTA donor tidak boleh ter-install di marble)"
+    done < <(find "$P_FS/product" "$P_FS/system_ext" "$P_FS/system/system" -mindepth 2 -maxdepth 2 -type d \
+                \( -path '*/app/*' -o -path '*/priv-app/*' \) \( -name Updater -o -name MiuiUpdater \) -print0 2>/dev/null)
+    if [[ $n -eq 0 ]]; then log "updater: tidak ada aplikasi Updater di ROM donor"; fi
+}
+
+# donor ROM xiaomi.eu (bukan OTA resmi Xiaomi)
+donor_is_eu() {
+    [[ ${PORT_ROM,,} == *xiaomi.eu* || ${PORT_ROM,,} == *xiaomieu* ]] && return 0
+    grep -qsE '^ro\.build\.host=xiaomi\.eu$|^ro\.product\.mod_device=.*_xiaomieu' \
+        "$P_FS/system/system/build.prop" "$P_FS/product/etc/build.prop" "$P_FS/mi_ext/etc/build.prop"
+}
+
+# langkah khusus donor xiaomi.eu, mengikuti toraidl/hyperos_port (is_eu_rom):
+# - constructor SystemServerImpl di miui-services.jar dikosongkan (hanya memanggil superclass)
+# - device_info.json (halaman "Tentang ponsel") diambil dari base
+eu_fixes() {
+    local jar api res line bj sj
+    log "donor xiaomi.eu terdeteksi -> langkah khusus xiaomi.eu"
+    if [[ -f $B_FS/product/etc/device_info.json ]]; then
+        cp -f "$B_FS/product/etc/device_info.json" "$P_FS/product/etc/device_info.json"
+        ok "xiaomi.eu: device_info.json dari base"
+    fi
+    if ! is_true "${EU_SYSTEMSERVER_PATCH:-true}"; then log "xiaomi.eu: patch SystemServerImpl dimatikan (EU_SYSTEMSERVER_PATCH)"; return 0; fi
+    jar=$(find "$P_FS/system_ext" "$P_FS/system/system" -type f -name miui-services.jar 2>/dev/null | head -n1)
+    bj="$TOOLS_DIR/bin/apktool/baksmali-3.0.5.jar"; sj="$TOOLS_DIR/bin/apktool/smali-3.0.5.jar"
+    if [[ -z $jar ]]; then warn "xiaomi.eu: miui-services.jar tidak ditemukan, patch SystemServerImpl dilewati"; return 0; fi
+    if ! command -v java >/dev/null || [[ ! -f $bj || ! -f $sj ]]; then
+        warn "xiaomi.eu: java / smali tidak tersedia -> SystemServerImpl TIDAK dipatch (toraidl selalu mematch ini untuk donor xiaomi.eu; risiko bootloop)"
+        return 0
+    fi
+    api=$(get_prop "$P_FS/system/system/build.prop" ro.build.version.sdk)
+    python3 "$SCRIPT_DIR/jar_smali_patch.py" --jar "$jar" --cls com/android/server/SystemServerImpl \
+        --baksmali "$bj" --smali "$sj" --api "${api:-34}" --work "$WORK/smali_ss" > "$WORK/eu_patch.log" 2>&1 || true
+    while IFS= read -r line; do
+        case $line in RESULT*|*JAVA_TOOL_OPTIONS*) ;; *) printf '    %s\n' "$line" ;; esac
+    done < "$WORK/eu_patch.log"
+    res=$(sed -n 's/^RESULT //p' "$WORK/eu_patch.log" | tail -n1)
+    case $res in
+        patched*) ok "xiaomi.eu: ${jar#"$P_FS"/}: constructor SystemServerImpl dikosongkan (${res#patched })" ;;
+        already*) ok "xiaomi.eu: SystemServerImpl sudah minimal, tidak perlu patch" ;;
+        *) warn "xiaomi.eu: patch SystemServerImpl gagal (${res:-tanpa hasil}) -> risiko bootloop, lihat log" ;;
+    esac
+    rm -rf "$WORK/smali_ss"
+}
+
 patch_port_resources() {
     local item f src
     DEBLOAT_KEEP=$(debloat_keep)
@@ -815,7 +907,12 @@ patch_port_resources() {
                     else
                         warn "overlay: base tidak punya product/overlay/$f.apk"
                     fi
-                done ;;
+                done
+                overlays_from_base ;;
+            misound)
+                app_from_base MiSound ;;
+            biometric)
+                app_from_base '*Biometric*' ;;
             camera)
                 if src=$(first_existing "$B_FS" product/priv-app/MiuiCamera product/app/MiuiCamera product/data-app/MiuiCamera); then
                     rm -rf "$P_FS"/product/priv-app/MiuiCamera "$P_FS"/product/app/MiuiCamera "$P_FS"/product/data-app/MiuiCamera
@@ -1593,6 +1690,8 @@ main() {
     report_app_sizes
     patch_port_resources
     apply_device_files
+    remove_updater
+    if donor_is_eu; then eu_fixes; fi
     rm -rf "${B_FS:?}/product" "$B_FS/config/product_"*
     rm -f "$B_IMG/product.img"
     patch_vendor_fstab
