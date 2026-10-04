@@ -85,7 +85,7 @@ env:
   OVERLAY_FIX: "true"          # buang overlay khas donor, salin overlay khas marble
   AOD_FIX: auto                # auto = patch DevicesAndroidOverlay (DozeService -> SystemUI) hanya kalau donor tak punya com.miui.aod | true | false
   MILLET_FIX: "true"           # ro.millet.netlink disamakan dengan marble
-  SIGNATURE_PATCH: "true"     # true = matikan cek signature di services.jar (melemahkan keamanan, hanya build uji)
+  SIGNATURE_PATCH: "false"     # true = matikan cek signature di services.jar (melemahkan keamanan, hanya build uji)
   INSTALLER: base               # base = pakai META-INF ROM base (xiaomi.eu) | ours = installer buatan script
   RECOVERY_SUPER: raw          # hanya INSTALLER=ours. Mode base: super mengikuti layout zip base (super.img.0..8 sparse)
   # boot.img custom (kernel melt-rebase) menggantikan boot.img base; kosongkan untuk pakai boot base
