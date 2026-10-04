@@ -25,6 +25,9 @@ DISABLE_AVB=${DISABLE_AVB:-true}
 DEBUG_ADB=${DEBUG_ADB:-true}
 SUPER_SIZE=${SUPER_SIZE:-auto}
 REPLACE_FROM_BASE=${REPLACE_FROM_BASE:-"device_features displayconfig overlay camera misound biometric"}
+# fitur tambahan di product/etc/device_features/*.xml, format "nama:tipe:nilai" dipisah spasi
+# (tipe bool|integer|string; smart_fps_value:integer:auto = fps tertinggi dari fpsList; "none" = matikan)
+UNLOCK_FEATURES=${UNLOCK_FEATURES:-"support_smart_fps:bool:true smart_fps_value:integer:auto default_eyecare_mode:integer:2 paper_eyecare_default_texture:integer:0 support_aod_fullscreen:bool:true support_aod_aon:bool:true"}
 DEBLOAT=${DEBLOAT:-""}
 EROFS_COMP=${EROFS_COMP:-"lz4hc,9"}
 EXT4_HEADROOM_MB=${EXT4_HEADROOM_MB:-128}
@@ -96,6 +99,10 @@ set_prop() { # file key value (replace atau append)
 }
 
 need() { local t; for t in "$@"; do command -v "$t" >/dev/null || die "tool tidak ada: $t"; done; }
+
+# tambahan: AOD overlay, Millet, unlock device_features, patch signature services.jar (hanya fungsi)
+# shellcheck source=port_extras.sh
+source "$SCRIPT_DIR/port_extras.sh"
 
 # ------------------------------------------------------------------ fetch
 fetch() { # src dest_dir name -> echo path
@@ -1690,6 +1697,10 @@ main() {
     report_app_sizes
     patch_port_resources
     apply_device_files
+    fix_aod_overlay
+    millet_fix
+    unlock_device_features
+    patch_services_signature
     remove_updater
     if donor_is_eu; then eu_fixes; fi
     rm -rf "${B_FS:?}/product" "$B_FS/config/product_"*
