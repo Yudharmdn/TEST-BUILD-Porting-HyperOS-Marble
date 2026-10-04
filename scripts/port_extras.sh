@@ -174,7 +174,7 @@ unlock_device_features() {
 files_from_base() {
     local b p d bver pver f n=0
     b="$B_FS/product/media/bootanimation.zip"; p="$P_FS/product/media/bootanimation.zip"
-    if [[ -f $b && -f $p ]]; then cp -f "$b" "$p"; ok "bootanimation.zip dari base"; fi
+    if [[ -f $b ]]; then mkdir -p "$(dirname "$p")"; cp -f "$b" "$p"; ok "bootanimation.zip dari base"; fi
 
     bver=$(get_prop "$B_FS/product/etc/build.prop" ro.product.build.version.release); bver=${bver%%.*}
     pver=$(cat "$P_FS/mi_ext/etc/build.prop" "$P_FS/product/etc/build.prop" "$P_FS/system/system/build.prop" 2>/dev/null \
