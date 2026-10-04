@@ -10,13 +10,12 @@
 #    fix_aod_overlay            DevicesAndroidOverlay -> DozeService milik SystemUI (kalau donor tak punya com.miui.aod)
 #    millet_fix                 ro.millet.netlink disamakan dengan marble
 #    unlock_device_features     nyalakan fitur tambahan di product/etc/device_features/*.xml
-#    patch_services_signature   (opsional, default MATI) matikan cek signature di services.jar
+#    files_from_base            bootanimation, VoiceTrigger (base A15), props ringan (HyperOS-Port-Python)
 # =============================================================================
 
 AOD_FIX=${AOD_FIX:-auto}            # auto | true | false
 MILLET_FIX=${MILLET_FIX:-true}
 # UNLOCK_FEATURES (default dan format) dideklarasikan di blok konfigurasi port.sh.
-SIGNATURE_PATCH=${SIGNATURE_PATCH:-false}   # true = patch services.jar (melemahkan keamanan, hanya build uji)
 
 # ------------------------------------------------------------------ helper APK
 # apk_tool d|b <input> <output>  (apktool dari toolkit, lalu apktool di PATH, lalu APKEditor.jar)
@@ -40,7 +39,7 @@ apk_tool() {
 apk_sign() {
     local apk=$1 ks="$WORK/port_test.jks"
     if ! command -v apksigner >/dev/null; then
-        warn "sign: apksigner tidak ada, $(basename "$apk") tidak ditandatangani (kalau bootloop, cek ini dan SIGNATURE_PATCH)"
+        warn "sign: apksigner tidak ada, $(basename "$apk") tidak ditandatangani (overlay bisa ditolak PackageManager)"
         return 0
     fi
     if command -v zipalign >/dev/null; then
@@ -88,6 +87,17 @@ PY
         log "AOD: donor tidak punya com.miui.aod -> overlay diarahkan ke DozeService SystemUI"
     fi
 
+    # HyperOS 2/3: doze ada di SystemUI sebagai com.android.keyguard.doze.MiuiDozeService
+    # (HyperOS-Port-Python); SystemUI lama: com.android.systemui.doze.DozeService (hyperos_port)
+    local target=com.android.systemui/com.android.systemui.doze.DozeService sui
+    sui=$(find "$P_FS/system_ext" "$P_FS/product" -type f \( -name 'MiuiSystemUI.apk' -o -name 'SystemUI.apk' \) 2>/dev/null | head -n1 || true)
+    if [[ -n $sui ]] && python3 - "$sui" <<'PY'
+import sys, zipfile
+z = zipfile.ZipFile(sys.argv[1])
+sys.exit(0 if any(b"Lcom/android/keyguard/doze/MiuiDozeService;" in z.read(n) for n in z.namelist() if n.endswith(".dex")) else 1)
+PY
+    then target=com.android.systemui/com.android.keyguard.doze.MiuiDozeService; fi
+    log "AOD: target doze = $target"
     dec="$WORK/aod_overlay"; out="$WORK/DevicesAndroidOverlay.patched.apk"
     rm -rf "$dec" "$out"
     if ! apk_tool d "$apk" "$dec"; then
@@ -95,7 +105,7 @@ PY
         warn "AOD: decode overlay gagal, overlay marble dipertahankan"; return 0
     fi
     while IFS= read -r f; do
-        sed -i 's|com\.miui\.aod/com\.miui\.aod\.doze\.DozeService|com.android.systemui/com.android.systemui.doze.DozeService|g' "$f"
+        sed -i "s|com\.miui\.aod/com\.miui\.aod\.doze\.DozeService|$target|g" "$f"
         n=$((n + 1))
     done < <(grep -rlF 'com.miui.aod.doze.DozeService' "$dec" --include='*.xml' 2>/dev/null || true)
     if [[ $n -eq 0 ]]; then
@@ -107,7 +117,7 @@ PY
     fi
     apk_sign "$out"
     cp -f "$out" "$apk"
-    ok "AOD: $(basename "$apk") dipatch ($n file XML), DozeService -> com.android.systemui"
+    ok "AOD: $(basename "$apk") dipatch ($n file XML), DozeService -> $target"
 }
 
 # ------------------------------------------------------------------ Millet
@@ -155,32 +165,37 @@ unlock_device_features() {
     ok "device_features: unlock selesai (UNLOCK_FEATURES)"
 }
 
-# ------------------------------------------------------------------ signature services.jar
-patch_services_signature() {
-    local jar bj sj api res line
-    if ! is_true "$SIGNATURE_PATCH"; then
-        log "signature: patch services.jar dimatikan (SIGNATURE_PATCH=false, default)"
-        return 0
+# ------------------------------------------------------------------ dari base (HyperOS-Port-Python)
+# replacements.json + props.py toraidl/HyperOS-Port-Python:
+# - bootanimation.zip dari base
+# - VoiceTrigger dari base kalau base Android < 16 dan donor HyperOS 3+ (VoiceTrigger donor crash di A15)
+# - hapus ro.miui.density.primaryscale (skala UI milik layar donor)
+# - ro.miui.cust_erofs=0 kalau base tidak mengisinya (cust marble bukan erofs)
+files_from_base() {
+    local b p d bver pver f n=0
+    b="$B_FS/product/media/bootanimation.zip"; p="$P_FS/product/media/bootanimation.zip"
+    if [[ -f $b && -f $p ]]; then cp -f "$b" "$p"; ok "bootanimation.zip dari base"; fi
+
+    bver=$(get_prop "$B_FS/product/etc/build.prop" ro.product.build.version.release); bver=${bver%%.*}
+    pver=$(cat "$P_FS/mi_ext/etc/build.prop" "$P_FS/product/etc/build.prop" "$P_FS/system/system/build.prop" 2>/dev/null \
+        | sed -n 's/^ro\.mi\.os\.version\.name=//p' | head -n1)
+    b=$(find "$B_FS/product" -type d -name VoiceTrigger 2>/dev/null | head -n1 || true)
+    if [[ -n $b && ${bver:-0} =~ ^[0-9]+$ && ${bver:-0} -lt 16 && ${pver:-} == OS[3-9]* ]]; then
+        while IFS= read -r -d '' d; do rm -rf "$d"; n=$((n + 1)); done < <(find "$P_FS/product" "$P_FS/system_ext" -type d -name VoiceTrigger -print0 2>/dev/null)
+        mkdir -p "$P_FS/$(dirname "${b#"$B_FS"/}")"
+        cp -a "$b" "$P_FS/${b#"$B_FS"/}"
+        ok "VoiceTrigger: dari base ${b#"$B_FS"/} (base Android $bver, donor $pver; $n milik donor dibuang)"
+        if [[ ${b#"$B_FS"/} == */priv-app/* ]]; then base_privapp_perms "${b#"$B_FS"/}"; fi
     fi
-    warn "signature: SIGNATURE_PATCH=true melemahkan verifikasi signature (skema lama & sharedUserId). Hanya untuk build uji"
-    jar=$(find "$P_FS/system/system/framework" -maxdepth 1 -type f -name services.jar 2>/dev/null | head -n1 || true)
-    bj=$(find "$TOOLS_DIR/bin/apktool" -maxdepth 1 -name 'baksmali-*.jar' 2>/dev/null | sort | tail -n1 || true)
-    sj=$(find "$TOOLS_DIR/bin/apktool" -maxdepth 1 -name 'smali-*.jar' 2>/dev/null | sort | tail -n1 || true)
-    if [[ -z $jar ]]; then warn "signature: services.jar tidak ditemukan, dilewati"; return 0; fi
-    if ! command -v java >/dev/null || [[ -z $bj || -z $sj ]]; then
-        warn "signature: java / baksmali / smali tidak tersedia, services.jar tidak dipatch"; return 0
+
+    for f in "$P_FS/system/system/build.prop" "$P_FS/system_ext/etc/build.prop" "$P_FS/product/etc/build.prop" "$P_FS/mi_ext/etc/build.prop"; do
+        [[ -f $f ]] || continue
+        if grep -q '^ro\.miui\.density\.primaryscale=' "$f"; then
+            sed -i '/^ro\.miui\.density\.primaryscale=/d' "$f"; log "props: ro.miui.density.primaryscale dibuang dari ${f#"$P_FS"/}"
+        fi
+    done
+    if [[ -z $(get_prop "$B_FS/product/etc/build.prop" ro.miui.cust_erofs) ]]; then
+        set_prop "$P_FS/product/etc/build.prop" ro.miui.cust_erofs 0
+        log "props: ro.miui.cust_erofs=0"
     fi
-    api=$(get_prop "$P_FS/system/system/build.prop" ro.build.version.sdk)
-    python3 "$SCRIPT_DIR/services_sigpatch.py" --jar "$jar" --baksmali "$bj" --smali "$sj" \
-        --api "${api:-34}" --work "$WORK/sigpatch" > "$WORK/sigpatch.log" 2>&1 || true
-    while IFS= read -r line; do
-        case $line in RESULT*|*JAVA_TOOL_OPTIONS*) ;; *) printf '    %s\n' "$line" ;; esac
-    done < "$WORK/sigpatch.log"
-    res=$(sed -n 's/^RESULT //p' "$WORK/sigpatch.log" | tail -n1)
-    case $res in
-        patched*) ok "signature: services.jar dipatch (${res#patched } = min_sig join_shared_uid)" ;;
-        none*)    warn "signature: nama method tidak ditemukan di services.jar donor (mungkin berganti nama di Android ini), tidak ada yang diubah" ;;
-        *)        warn "signature: patch gagal (${res:-tanpa hasil}), services.jar tidak diubah, lihat $WORK/sigpatch.log" ;;
-    esac
-    rm -rf "$WORK/sigpatch"
 }

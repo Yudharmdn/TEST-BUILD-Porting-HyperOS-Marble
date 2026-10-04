@@ -801,7 +801,7 @@ PY
 # overlay konfigurasi device lain (toraidl/hyperos_port): isi resource framework/Settings/biometrik
 # khas hardware (kecerahan, cutout kamera, sudut layar, sensor sidik jari). Diganti versi base kalau
 # keduanya ada. Telephony: disalin dari base, atau dibuang kalau base tidak punya.
-OVERLAYS_FROM_BASE="AospFrameworkResOverlay MiuiFrameworkResOverlay SettingsRroDeviceHideStatusBarOverlay MiuiBiometricResOverlay"
+OVERLAYS_FROM_BASE="AospFrameworkResOverlay MiuiFrameworkResOverlay MiuiCarrierConfigOverlay SettingsRroDeviceSystemUiOverlay SettingsRroDeviceHideStatusBarOverlay MiuiBiometricResOverlay"
 overlays_from_base() {
     local f b p
     for f in $OVERLAYS_FROM_BASE; do
@@ -883,7 +883,15 @@ eu_fixes() {
     done < "$WORK/eu_patch.log"
     res=$(sed -n 's/^RESULT //p' "$WORK/eu_patch.log" | tail -n1)
     case $res in
-        patched*) ok "xiaomi.eu: ${jar#"$P_FS"/}: constructor SystemServerImpl dikosongkan (${res#patched })" ;;
+        patched*)
+            ok "xiaomi.eu: ${jar#"$P_FS"/}: constructor SystemServerImpl dikosongkan (${res#patched })"
+            # odex/vdex prebuilt dibuat dari dex LAMA: checksum tidak cocok lagi -> dibuang,
+            # ART memakai dex di jar (lalu dikompilasi ulang otomatis oleh odrefresh)
+            local o
+            while IFS= read -r -d '' o; do
+                rm -f "$o"; log "xiaomi.eu: ${o#"$P_FS"/} dibuang (dibuat dari miui-services.jar lama)"
+            done < <(find "$(dirname "$jar")/oat" -type f -name 'miui-services.*' -print0 2>/dev/null)
+            ;;
         already*) ok "xiaomi.eu: SystemServerImpl sudah minimal, tidak perlu patch" ;;
         *) warn "xiaomi.eu: patch SystemServerImpl gagal (${res:-tanpa hasil}) -> risiko bootloop, lihat log" ;;
     esac
@@ -1700,7 +1708,7 @@ main() {
     fix_aod_overlay
     millet_fix
     unlock_device_features
-    patch_services_signature
+    files_from_base
     remove_updater
     if donor_is_eu; then eu_fixes; fi
     rm -rf "${B_FS:?}/product" "$B_FS/config/product_"*
