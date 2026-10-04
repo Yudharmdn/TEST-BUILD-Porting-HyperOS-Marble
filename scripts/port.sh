@@ -890,7 +890,7 @@ eu_fixes() {
             local o
             while IFS= read -r -d '' o; do
                 rm -f "$o"; log "xiaomi.eu: ${o#"$P_FS"/} dibuang (dibuat dari miui-services.jar lama)"
-            done < <(find "$(dirname "$jar")/oat" -type f -name 'miui-services.*' -print0 2>/dev/null)
+            done < <(find "$(dirname "$jar")/oat" -type f -name 'miui-services.*' -print0 2>/dev/null || true)
             ;;
         already*) ok "xiaomi.eu: SystemServerImpl sudah minimal, tidak perlu patch" ;;
         *) warn "xiaomi.eu: patch SystemServerImpl gagal (${res:-tanpa hasil}) -> risiko bootloop, lihat log" ;;
@@ -1280,23 +1280,31 @@ sum_images() { # total byte semua image di OUT_IMG_TMP
 
 # kalau tidak muat di super: vendor/odm EXT4 dibangun ulang sebagai EROFS (lebih kecil)
 fit_super() {
-    local total p new=""
+    local total p new="" sz cand=() root
     resolve_super
     total=$(sum_images)
     log "cek muat: $(( total / 1048576 )) MB / $(( SUPER_GMAX / 1048576 )) MB"
     [[ $total -gt $SUPER_GMAX ]] || return 0
     if ! is_true "$FIT_FALLBACK_EROFS"; then return 0; fi
+    # partisi EXT4 terbesar dulu dibangun ulang sebagai EROFS, berhenti begitu muat
     for p in $EXT4_PARTITIONS; do
-        if [[ ($p == vendor || $p == odm) && -d $B_FS/$p ]]; then
-            warn "super tidak muat: $p dibangun ulang sebagai EROFS (read-only, tidak bisa rw)"
-            repack_erofs "$B_FS" "$p" "$OUT_IMG_TMP/$p.img"
+        sz=$(stat -c%s "$OUT_IMG_TMP/$p.img" 2>/dev/null || echo 0)
+        cand+=("$sz $p")
+    done
+    while read -r sz p; do
+        [[ -n $p ]] || continue
+        if [[ $total -le $SUPER_GMAX ]]; then new+="${new:+ }$p"; continue; fi
+        case $p in vendor|odm) root=$B_FS ;; *) root=$P_FS ;; esac
+        if [[ -d $root/$p ]]; then
+            warn "super tidak muat: $p ($(( sz / 1048576 )) MB) dibangun ulang sebagai EROFS (read-only, tidak bisa rw)"
+            repack_erofs "$root" "$p" "$OUT_IMG_TMP/$p.img"
+            total=$(sum_images)
         else
             new+="${new:+ }$p"
         fi
-    done
+    done < <(printf '%s\n' "${cand[@]}" | sort -rn)
     EXT4_PARTITIONS=$new
-    total=$(sum_images)
-    log "setelah fallback EROFS: $(( total / 1048576 )) MB / $(( SUPER_GMAX / 1048576 )) MB"
+    log "setelah fallback EROFS: $(( total / 1048576 )) MB / $(( SUPER_GMAX / 1048576 )) MB (masih EXT4: ${EXT4_PARTITIONS:-tidak ada})"
 }
 
 build_super() {
@@ -1726,8 +1734,8 @@ main() {
             log "repack port $p (ext4)"; repack_ext4 "$P_FS" "$p" "$OUT_IMG_TMP/$p.img" "$RW_MOUNT"
         else
             log "repack port $p (erofs)"; repack_erofs "$P_FS" "$p" "$OUT_IMG_TMP/$p.img"
+            rm -rf "${P_FS:?}/$p"
         fi
-        rm -rf "${P_FS:?}/$p"
     done
     for p in vendor odm; do
         [[ -d $B_FS/$p ]] || continue
@@ -1744,6 +1752,8 @@ main() {
     done
     for p in $logical; do rm -f "$B_IMG/$p.img"; done
     fit_super
+    # folder EXT4 disimpan sampai fit_super (bisa dibangun ulang sebagai EROFS), baru dibuang
+    for p in $PORT_PARTITIONS; do rm -rf "${P_FS:?}/$p"; done
     rm -rf "${B_FS:?}/vendor" "${B_FS:?}/odm"
     ls -la "$OUT_IMG_TMP"; dfree
     group_end

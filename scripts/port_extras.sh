@@ -133,7 +133,7 @@ millet_fix() {
         if [[ -n $val ]]; then src=${f#"$B_FS"/}; break; fi
     done
     if [[ -z $val ]]; then
-        warn "Millet: $key tidak ditemukan di base marble (product/vendor/odm), nilai donor tidak diubah"
+        log "Millet: $key tidak ada di base marble (product/vendor/odm), nilai donor dipertahankan"
         return 0
     fi
     old=$(cat "$P_FS/system/system/build.prop" "$P_FS/system_ext/etc/build.prop" \
