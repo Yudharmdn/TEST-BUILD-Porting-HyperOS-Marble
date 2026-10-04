@@ -33,6 +33,11 @@ on:
         required: false
         default: ""
         type: string
+      unlock_features:
+        description: "Fitur device_features, format nama:tipe:nilai pisah spasi (mis. support_smart_fps:bool:true). Kosong = default script, none = matikan"
+        required: false
+        default: ""
+        type: string
       disable_encryption:
         description: "Matikan fileencryption/metadata_encryption di fstab"
         required: false
@@ -78,6 +83,9 @@ env:
   VINTF_COMPAT: "true"         # FCM level vendor tak dikenal donor -> salin compatibility_matrix.<lv>.xml dari system base ke /system/etc/vintf port
   PROP_MERGE: "true"           # salin props khas device dari product/etc/build.prop base marble
   OVERLAY_FIX: "true"          # buang overlay khas donor, salin overlay khas marble
+  AOD_FIX: auto                # auto = patch DevicesAndroidOverlay (DozeService -> SystemUI) hanya kalau donor tak punya com.miui.aod | true | false
+  MILLET_FIX: "true"           # ro.millet.netlink disamakan dengan marble
+  SIGNATURE_PATCH: "false"     # true = matikan cek signature di services.jar (melemahkan keamanan, hanya build uji)
   INSTALLER: base               # base = pakai META-INF ROM base (xiaomi.eu) | ours = installer buatan script
   RECOVERY_SUPER: raw          # hanya INSTALLER=ours. Mode base: super mengikuti layout zip base (super.img.0..8 sparse)
   # boot.img custom (kernel melt-rebase) menggantikan boot.img base; kosongkan untuk pakai boot base
@@ -120,6 +128,9 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq aria2 zstd zip unzip e2fsprogs python3 default-jre-headless >/dev/null
+          # apksigner + zipalign untuk menandatangani overlay AOD hasil patch (SDK Android sudah dihapus di step disk).
+          # Tidak fatal: kalau paket tidak ada, port.sh hanya memberi warning.
+          sudo apt-get install -y -qq apksigner zipalign >/dev/null || echo "::warning::apksigner/zipalign tidak tersedia, overlay AOD tidak ditandatangani"
           aria2c --version | head -n1
           java -version 2>&1 | head -n1
 
@@ -191,10 +202,21 @@ jobs:
           RW_MOUNT: ${{ inputs.rw_mount }}
           DEBUG_ADB: ${{ inputs.debug_adb }}
           RECOVERY_IMG: ${{ inputs.recovery_img_url }}
+          UNLOCK_FEATURES: ${{ inputs.unlock_features }}
         run: |
           set -euo pipefail
           sudo -E env "PATH=$PATH" bash scripts/port.sh
           sudo chown -R "$USER" "$OUT"
+
+      - name: Upload log kerja (hanya kalau gagal)
+        if: ${{ failure() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: log-kerja-${{ github.run_number }}
+          path: ${{ env.WORK }}/*.log
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Upload artifact (zip ROM langsung, tanpa dibungkus)
         if: ${{ inputs.release_repo == '' }}
@@ -252,6 +274,7 @@ jobs:
           DISABLE_ENCRYPTION: ${{ inputs.disable_encryption }}
           RW_MOUNT: ${{ inputs.rw_mount }}
           DEBUG_ADB: ${{ inputs.debug_adb }}
+          UNLOCK_FEATURES: ${{ inputs.unlock_features }}
         run: |
           {
             echo "## Port HyperOS -> ${TARGET_DEVICE}"
@@ -266,6 +289,7 @@ jobs:
             echo "| RW | ${RW_MOUNT} |"
             echo "| Debug ADB | ${DEBUG_ADB} |"
             echo "| Installer | ${INSTALLER} |"
+            echo "| Unlock fitur | ${UNLOCK_FEATURES:-default} |"
             if ls out/*.sha256 >/dev/null 2>&1; then
               echo
               echo "SHA256: \`$(cut -d' ' -f1 out/*.sha256 | head -n1)\`"
