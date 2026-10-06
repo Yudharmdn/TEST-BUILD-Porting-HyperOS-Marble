@@ -88,7 +88,7 @@ env:
   INSTALLER: base               # base = pakai META-INF ROM base (xiaomi.eu) | ours = installer buatan script
   RECOVERY_SUPER: raw          # hanya INSTALLER=ours. Mode base: super mengikuti layout zip base (super.img.0..8 sparse)
   # boot.img custom (kernel melt-rebase) menggantikan boot.img base; kosongkan untuk pakai boot base
-  BOOT_IMG: ""
+  BOOT_IMG: "https://github.com/Yudharmdn/boot-melt-rebase/releases/download/boot-melt-rebase/boot.img"
   # Gboard sebagai keyboard sistem (product/app/LatinImeGoogle); kosongkan untuk tidak menambah
   GBOARD_APK: https://github.com/Yudharmdn/boot-melt-rebase/releases/download/boot-melt-rebase/LatinImeGoogle.apk
   GBOARD_PACKAGE: com.charlie.android.inputmethod.latin
