@@ -12,7 +12,8 @@ on:
     inputs:
       base_rom_url:
         description: "URL zip xiaomi.eu marble (zip recovery; META-INF & firmware-nya dipakai)"
-        required: true
+        required: false
+        default: "https://downloads.sourceforge.net/project/xiaomi-eu-multilang-miui-roms/xiaomi.eu/HyperOS-STABLE-RELEASES/HyperOS3.0/xiaomi.eu_MARBLE_OS3.0.5.0.VMRCNXM_15.zip?ts=gAAAAABqumL60xOKGI5GPuiICx5kFfeQy9VTpzQlR1z5bFdriOEnNp2LBD20UdfA95pWcu_dm3iMZRe3KvIbRGnbB0z2thETdA%3D%3D&use_mirror=sf-west-interserver-1&r=https%3A%2F%2Fsourceforge.net%2Fprojects%2Fxiaomi-eu-multilang-miui-roms%2Ffiles%2Fxiaomi.eu%2FHyperOS-STABLE-RELEASES%2FHyperOS3.0%2F"
         type: string
       port_rom_url:
         description: "URL OTA full ROM donor HyperOS A16/A17 (.zip berisi payload.bin)"
