@@ -106,6 +106,13 @@ product/data-app/MiShop                      | Mi Shop
 product/priv-app/MIUIBrowser                 | browser bawaan
 product/priv-app/VoiceAssistAndroidT         | XiaoAi / asisten suara
 product/app/WinPlay                          | interkoneksi PC
+product/data-app/Music
+product/data-app/SuperWallpaperSnowmountain
+product/data-app/SuperWallpaperMoon
+product/priv-app/LinkToWindows
+product/data-app/SuperWallpaperEarth
+product/data-app/SuperWallpaperMars
+product/data-app/MiBrowser
 
 # ============================================================================
 # KEEP - tidak pernah dihapus (awalan '!'). Mengalahkan semua daftar di atas.
