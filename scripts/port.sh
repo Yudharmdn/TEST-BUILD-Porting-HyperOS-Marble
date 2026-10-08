@@ -103,6 +103,8 @@ need() { local t; for t in "$@"; do command -v "$t" >/dev/null || die "tool tida
 # tambahan: AOD overlay, Millet, unlock device_features, patch signature services.jar (hanya fungsi)
 # shellcheck source=port_extras.sh
 source "$SCRIPT_DIR/port_extras.sh"
+# shellcheck source=port_arch64.sh
+source "$SCRIPT_DIR/port_arch64.sh"
 
 # ------------------------------------------------------------------ fetch
 fetch() { # src dest_dir name -> echo path
@@ -1704,6 +1706,7 @@ main() {
     if is_true "$VNDK_COMPAT"; then vndk_compat; fi
     vintf_device_check
     if is_true "$LINKER_CHECK"; then linker_check; fi
+    arch64_fix   # donor 64-bit-only di atas vendor 64-32 (ARCH64_FIX=auto: hanya jalan kalau donor tanpa lib 32-bit)
 
     DEBLOAT_KEEP=$(debloat_keep)
     if is_true "$PROP_MERGE"; then merge_device_props; fi

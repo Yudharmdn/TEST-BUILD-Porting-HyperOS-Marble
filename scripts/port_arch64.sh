@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  port_arch64.sh - donor 64-bit-only (aarch64) di atas vendor marble 64-32 (di-source port.sh)
+#
+#  Mengikuti panduan "Port HyperOS aarch64 (64-bit) dengan vendor bawaan device (64-32)"
+#  (Reguit n fix by Project_MINT, original by @jopvan1). Dipakai kalau ROM donor tidak membawa
+#  lib 32-bit (K90/annibale, dll). Donor yang masih 64-32 TIDAK diubah sama sekali.
+#
+#  Memakai helper/variabel port.sh: log ok warn is_true get_prop set_prop extract_img
+#                                   P_FS B_FS B_IMG WORK
+#
+#  ARCH64_FIX=auto|true|false   auto = jalan hanya kalau donor terdeteksi 64-bit-only
+#  ARCH64_COPY_LIB=false        true = salin juga system/lib + system_ext/lib dari base
+#                               (di panduan opsional: internal tetap aman tanpa ini)
+#
+#  Langkah (nomor = nomor di panduan):
+#    1+2  /system/bin/{linker,linker_asan} dan /system/bin/bootstrap/{linker,linker_asan}
+#         diganti symlink dari base (linker_asan64 & linker_hwasan64 tetap milik donor)
+#    2    /system/bin/vold dan vold_prepare_subdirs dari base
+#    3    (opsional) system/lib dan system_ext/lib dari base
+#    4    odm build.prop   : abilist=arm64-v8a, abilist32=, abilist64=arm64-v8a, ro.zygote=zygote64, dex2oat64
+#    5    vendor build.prop: sama seperti odm
+#    6    vendor/etc/init  : file rc media omx dihapus
+#    7    vendor/etc/vintf : HAL android.hardware.media.omx dihapus dari manifest
+#    BONUS system/etc/init/mediaserver_dynamic_QCOM.rc: import mediaserver.64bit_true.rc
+# =============================================================================
+
+ARCH64_FIX=${ARCH64_FIX:-auto}
+ARCH64_COPY_LIB=${ARCH64_COPY_LIB:-false}
+
+# donor tidak punya lib 32-bit? (dua sinyal: folder system/lib kosong/tidak ada, abilist tanpa armeabi-v7a)
+a64_donor_is_64only() {
+    local sys="$P_FS/system/system" list no_lib=0 no_abi=0
+    list=$(get_prop "$sys/build.prop" ro.system.product.cpu.abilist)
+    if [[ -z $(find "$sys/lib" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null || true) ]]; then no_lib=1; fi
+    if [[ -n $list && $list != *armeabi-v7a* ]]; then no_abi=1; fi
+    log "arch64: donor abilist='${list:-?}' | system/lib $([[ $no_lib == 1 ]] && echo kosong/tidak ada || echo ada)"
+    [[ $no_lib == 1 || $no_abi == 1 ]]
+}
+
+# a64_take <rel di system/system>: ganti milik donor dengan milik base (symlink ikut disalin apa adanya)
+a64_take() {
+    local rel=$1 s="$A64_BASE_SYS/$1" d="$P_FS/system/system/$1"
+    if [[ ! -e $s && ! -L $s ]]; then warn "arch64: $rel tidak ada di base, dilewati"; return 1; fi
+    rm -rf "$d"
+    mkdir -p "$(dirname "$d")"
+    cp -a "$s" "$d"
+    if [[ -L $s ]]; then ok "arch64: system/$rel <- base (symlink -> $(readlink "$s"))"
+    else ok "arch64: system/$rel <- base"; fi
+}
+
+# a64_prop <file> k=v ...  : isi file utama; file *build.prop lain di folder yang sama hanya diubah kalau sudah mendefinisikan key-nya
+a64_prop() {
+    local f=$1 kv k v g; shift
+    [[ -f $f ]] || { warn "arch64: ${f#"$B_FS"/} tidak ada, props dilewati"; return 0; }
+    for kv in "$@"; do
+        k=${kv%%=*}; v=${kv#*=}
+        set_prop "$f" "$k" "$v"
+        for g in "$(dirname "$f")"/*build.prop; do
+            [[ -f $g && $g != "$f" ]] || continue
+            if grep -qE "^${k//./\\.}=" "$g"; then set_prop "$g" "$k" "$v"; fi
+        done
+    done
+    ok "arch64: props ${f#"$B_FS"/} -> $*"
+}
+
+# hapus blok <hal>...</hal> android.hardware.media.omx dari file manifest VINTF
+a64_strip_omx_hal() { # file...
+    local f n
+    for f in "$@"; do
+        [[ -f $f ]] || continue
+        n=$(python3 - "$f" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8", errors="replace").read()
+removed = 0
+def drop(m):
+    global removed
+    if re.search(r"<name>\s*android\.hardware\.media\.omx\s*</name>", m.group(0)):
+        removed += 1
+        return ""
+    return m.group(0)
+t = re.sub(r"<hal\b.*?</hal>", drop, s, flags=re.S)
+if removed:
+    open(p, "w", encoding="utf-8").write(t)
+print(removed)
+PY
+)
+        if [[ ${n:-0} -gt 0 ]]; then ok "arch64: HAL media.omx dihapus dari ${f#"$B_FS"/} ($n blok)"; fi
+    done
+}
+
+arch64_fix() {
+    local mode=${ARCH64_FIX,,} root sysdir f n lib rc
+    case $mode in
+        false|off|no|0) log "arch64: dimatikan (ARCH64_FIX=$ARCH64_FIX)"; return 0 ;;
+        auto)
+            if ! a64_donor_is_64only; then
+                log "arch64: donor masih membawa lib 32-bit (64-32), langkah panduan 64-bit dilewati"; return 0
+            fi ;;
+        true|on|yes|1) ;;
+        *) warn "arch64: ARCH64_FIX='$ARCH64_FIX' tidak dikenal (auto|true|false), dilewati"; return 0 ;;
+    esac
+    log "arch64: donor 64-bit-only -> terapkan panduan 64-bit di atas vendor 64-32"
+
+    # --- ambil system base (ROM 64-32)
+    root="$WORK/base_arch"; rm -rf "$root"; mkdir -p "$root"
+    if [[ -n ${A64_BASE_SYS_OVERRIDE:-} ]]; then   # untuk uji: folder system base yang sudah ada
+        A64_BASE_SYS=$A64_BASE_SYS_OVERRIDE
+    else
+        [[ -f $B_IMG/system.img ]] || { warn "arch64: $B_IMG/system.img tidak ada, tidak bisa mengambil file 64-32 dari base"; return 0; }
+        extract_img "$B_IMG/system.img" "$root"
+        A64_BASE_SYS="$root/system/system"
+        [[ -d $A64_BASE_SYS/bin ]] || A64_BASE_SYS="$root/system"
+    fi
+    sysdir="$P_FS/system/system"
+
+    # --- 1+2: linker & vold dari base
+    for f in bin/linker bin/linker_asan bin/bootstrap/linker bin/bootstrap/linker_asan; do a64_take "$f" || true; done
+    log "arch64: linker_asan64 & linker_hwasan64 tetap milik donor (sesuai panduan)"
+    for f in bin/vold bin/vold_prepare_subdirs; do
+        if a64_take "$f"; then chmod 0755 "$sysdir/$f" 2>/dev/null || true; fi
+    done
+
+    # --- 3: lib 32-bit (opsional)
+    if is_true "$ARCH64_COPY_LIB"; then
+        if [[ -d $A64_BASE_SYS/lib ]]; then
+            mkdir -p "$sysdir/lib"; cp -a "$A64_BASE_SYS/lib/." "$sysdir/lib/"
+            ok "arch64: system/lib <- base ($(find "$sysdir/lib" -type f | wc -l) file; libc/libm/libdl/libdl-android = symlink ikut disalin)"
+        else warn "arch64: system/lib tidak ada di base"; fi
+        if [[ -z ${A64_BASE_SYS_OVERRIDE:-} && -f $B_IMG/system_ext.img ]]; then
+            extract_img "$B_IMG/system_ext.img" "$root"
+            if [[ -d $root/system_ext/lib ]]; then
+                mkdir -p "$P_FS/system_ext/lib"; cp -a "$root/system_ext/lib/." "$P_FS/system_ext/lib/"
+                ok "arch64: system_ext/lib <- base"
+            fi
+        fi
+    else
+        log "arch64: system/lib & system_ext/lib tidak disalin (opsional, ARCH64_COPY_LIB=true untuk menyalin)"
+    fi
+
+    # --- 4+5: props odm & vendor
+    a64_prop "$B_FS/odm/etc/build.prop" \
+        ro.odm.product.cpu.abilist=arm64-v8a ro.odm.product.cpu.abilist32= ro.odm.product.cpu.abilist64=arm64-v8a \
+        ro.zygote=zygote64 dalvik.vm.dex2oat64.enabled=true
+    a64_prop "$B_FS/vendor/build.prop" \
+        ro.vendor.product.cpu.abilist=arm64-v8a ro.vendor.product.cpu.abilist32= ro.vendor.product.cpu.abilist64=arm64-v8a \
+        ro.zygote=zygote64 dalvik.vm.dex2oat64.enabled=true
+    if [[ ! -f $sysdir/etc/init/hw/init.zygote64.rc ]]; then
+        warn "arch64: system donor tidak punya etc/init/hw/init.zygote64.rc -> ro.zygote=zygote64 tidak akan jalan"
+    fi
+
+    # --- 6: rc media omx
+    n=0
+    while IFS= read -r -d '' rc; do
+        rm -f "$rc"; n=$((n + 1)); ok "arch64: vendor/etc/init/$(basename "$rc") dihapus"
+    done < <(find "$B_FS/vendor/etc/init" -maxdepth 1 -type f -iname '*omx*' -print0 2>/dev/null || true)
+    [[ $n -gt 0 ]] || log "arch64: vendor/etc/init tidak punya file rc omx"
+    log "arch64: sisa rc media di vendor/etc/init: $(find "$B_FS/vendor/etc/init" -maxdepth 1 -type f -iname '*media*' -printf '%f ' 2>/dev/null || true)"
+
+    # --- 7: HAL omx di manifest vendor (dan fragmennya)
+    a64_strip_omx_hal "$B_FS/vendor/etc/vintf/manifest.xml" "$B_FS"/vendor/etc/vintf/manifest/*.xml "$B_FS"/odm/etc/vintf/manifest.xml
+
+    # --- BONUS: mediaserver
+    n=0
+    for rc in "$sysdir/etc/init/mediaserver_dynamic_QCOM.rc" "$P_FS/system_ext/etc/init/mediaserver_dynamic_QCOM.rc"; do
+        [[ -f $rc ]] || continue
+        if grep -q 'mediaserver\.64bit_\${ro\.mediaserver\.64b\.enable:-false}\.rc' "$rc"; then
+            sed -i 's|^\(import /system/etc/init/hw/mediaserver\.64bit_\)\${ro\.mediaserver\.64b\.enable:-false}\(\.rc\)|\1true\2|' "$rc"
+            ok "arch64: ${rc#"$P_FS"/} import -> mediaserver.64bit_true.rc (on property:* tidak disentuh)"
+            [[ -f $(dirname "$rc")/hw/mediaserver.64bit_true.rc ]] \
+                || warn "arch64: hw/mediaserver.64bit_true.rc tidak ada di $(dirname "${rc#"$P_FS"/}") -> import akan gagal"
+        else
+            log "arch64: ${rc#"$P_FS"/} tidak memakai pola import 64bit_\${...}, dilewati"
+        fi
+        n=$((n + 1))
+    done
+    [[ $n -gt 0 ]] || log "arch64: mediaserver_dynamic_QCOM.rc tidak ada di donor, bonus mediaserver dilewati"
+
+    rm -rf "$root"
+    warn "arch64: panduan ini diuji orang lain di device lain (T2PAS) -> kalau bootloop, mulai dari ARCH64_COPY_LIB=true/false dan cek logcat 'linker'/'vold'/'omx'"
+}
