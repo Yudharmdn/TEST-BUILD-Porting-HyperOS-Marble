@@ -129,6 +129,72 @@ PY
     done <<< "$out"
 }
 
+# symlink /system/bin/linker (dari base) menunjuk ke /apex/com.android.runtime/bin/linker. APEX runtime donor 64-only
+# bisa saja tidak membawa linker 32-bit -> symlink menggantung. Hanya diperiksa + warning, tidak ada yang diubah
+# (catatan panduan: system/apex/runtime tetap milik donor kalau donor bisa boot).
+a64_check_runtime_linker() {
+    local out kind f n=0
+    out=$(python3 - "${EXTRACT_EROFS:-${BIN:-}/extract.erofs}" "$P_FS/system/system/apex" "$P_FS/system_ext/apex" <<'PYAPEX'
+import io, os, shutil, struct, subprocess, sys, tempfile, zipfile
+erofs = sys.argv[1]
+def names_in_payload(payload):
+    tmpd = tempfile.mkdtemp(prefix="rt_")
+    try:
+        img = os.path.join(tmpd, "p.img")
+        open(img, "wb").write(payload)
+        if len(payload) > 1082 and payload[1080:1082] == b"\x53\xef":
+            r = subprocess.run(["debugfs", "-R", "ls -p /bin", img], capture_output=True, text=True)
+            out = set()
+            for line in r.stdout.splitlines():
+                parts = line.strip("/").split("/")
+                if len(parts) >= 5:
+                    out.add(parts[4])
+            return out
+        if len(payload) > 1028 and struct.unpack("<I", payload[1024:1028])[0] == 0xE0F5E1E2 and erofs and os.path.exists(erofs):
+            o = os.path.join(tmpd, "x"); os.makedirs(o)
+            subprocess.run([erofs, "-i", img, "-X", "bin", "-o", o], capture_output=True)
+            out = set()
+            for _r, ds, fs in os.walk(o):
+                out.update(ds); out.update(fs)
+            return out
+        return None
+    finally:
+        shutil.rmtree(tmpd, ignore_errors=True)
+for d in sys.argv[2:]:
+    if not os.path.isdir(d):
+        continue
+    for fn in sorted(os.listdir(d)):
+        if not fn.startswith("com.android.runtime"):
+            continue
+        p = os.path.join(d, fn)
+        if os.path.isdir(p):                                   # apex ter-flatten
+            print("%s %s" % ("OK" if os.path.lexists(os.path.join(p, "bin", "linker")) else "NO", fn))
+            continue
+        try:
+            with zipfile.ZipFile(p) as z:
+                if fn.endswith(".capex"):
+                    with zipfile.ZipFile(io.BytesIO(z.read("original_apex"))) as z2:
+                        payload = z2.read("apex_payload.img")
+                else:
+                    payload = z.read("apex_payload.img")
+            names = names_in_payload(payload)
+        except (KeyError, zipfile.BadZipFile, OSError):
+            names = None
+        print("%s %s" % ("UNKNOWN" if names is None else ("OK" if "linker" in names else "NO"), fn))
+PYAPEX
+) || { warn "arch64: cek linker APEX runtime gagal dijalankan"; return 0; }
+    while read -r kind f; do
+        [[ -n ${kind:-} ]] || continue
+        n=$((n + 1))
+        case $kind in
+            OK) ok "arch64: $f membawa bin/linker (target symlink /system/bin/linker ada)" ;;
+            NO) warn "arch64: $f TIDAK punya bin/linker -> symlink /system/bin/linker (dari base) menggantung, binary 32-bit vendor gagal start. Pertimbangkan APEX com.android.runtime dari base" ;;
+            *)  log "arch64: $f tidak bisa diperiksa (format payload tidak dikenal), cek manual bin/linker" ;;
+        esac
+    done <<< "$out"
+    [[ $n -gt 0 ]] || log "arch64: APEX com.android.runtime donor tidak ditemukan, cek bin/linker dilewati"
+}
+
 # hapus blok <hal>...</hal> android.hardware.media.omx dari file manifest VINTF
 a64_strip_omx_hal() { # file...
     local f n
@@ -208,7 +274,9 @@ arch64_fix() {
             ok "arch64: system/lib <- base (mode $cp_mode, sekarang $(find "$sysdir/lib" -type f | wc -l) file; libc/libm/libdl/libdl-android = symlink ikut disalin)"
         else warn "arch64: system/lib tidak ada di base"; fi
         if [[ -z ${A64_BASE_SYS_OVERRIDE:-} && -f $B_IMG/system_ext.img ]]; then
-            extract_img "$B_IMG/system_ext.img" "$root"
+            if ! ( extract_img "$B_IMG/system_ext.img" "$root" ); then
+                warn "arch64: ekstrak system_ext.img base gagal, system_ext/lib tidak disalin (opsional)"
+            fi
             if [[ -d $root/system_ext/lib ]]; then
                 a64_record_new "$root/system_ext/lib" "$P_FS/system_ext/lib" system_ext/lib "$A64_LIST_EXT" "$cp_mode"
                 mkdir -p "$P_FS/system_ext/lib"; cp "${cpo[@]}" "$root/system_ext/lib/." "$P_FS/system_ext/lib/"
@@ -220,6 +288,8 @@ arch64_fix() {
     # --- label SELinux + izin file yang diambil dari base
     a64_sync_cfg system "$A64_BASE_CFG" "$A64_LIST_SYS"
     a64_sync_cfg system_ext "$A64_BASE_CFG" "$A64_LIST_EXT"
+
+    a64_check_runtime_linker
 
     # --- 4+5: props odm & vendor
     a64_prop "$B_FS/odm/etc/build.prop" \
@@ -241,7 +311,8 @@ arch64_fix() {
     log "arch64: sisa rc media di vendor/etc/init: $(find "$B_FS/vendor/etc/init" -maxdepth 1 -type f -iname '*media*' -printf '%f ' 2>/dev/null || true)"
 
     # --- 7: HAL omx di manifest vendor (dan fragmennya)
-    a64_strip_omx_hal "$B_FS/vendor/etc/vintf/manifest.xml" "$B_FS"/vendor/etc/vintf/manifest/*.xml "$B_FS"/odm/etc/vintf/manifest.xml
+    a64_strip_omx_hal "$B_FS"/vendor/etc/vintf/manifest*.xml "$B_FS"/vendor/etc/vintf/manifest/*.xml \
+                      "$B_FS"/odm/etc/vintf/manifest*.xml "$B_FS"/odm/etc/vintf/manifest/*.xml
 
     # --- BONUS: mediaserver
     n=0
@@ -250,8 +321,8 @@ arch64_fix() {
         if grep -q 'mediaserver\.64bit_\${ro\.mediaserver\.64b\.enable:-false}\.rc' "$rc"; then
             sed -i 's|^\(import /system/etc/init/hw/mediaserver\.64bit_\)\${ro\.mediaserver\.64b\.enable:-false}\(\.rc\)|\1true\2|' "$rc"
             ok "arch64: ${rc#"$P_FS"/} import -> mediaserver.64bit_true.rc (on property:* tidak disentuh)"
-            [[ -f $(dirname "$rc")/hw/mediaserver.64bit_true.rc ]] \
-                || warn "arch64: hw/mediaserver.64bit_true.rc tidak ada di $(dirname "${rc#"$P_FS"/}") -> import akan gagal"
+            [[ -f $sysdir/etc/init/hw/mediaserver.64bit_true.rc ]] \
+                || warn "arch64: system/etc/init/hw/mediaserver.64bit_true.rc tidak ada di donor -> import /system/etc/init/hw/mediaserver.64bit_true.rc akan gagal"
         else
             log "arch64: ${rc#"$P_FS"/} tidak memakai pola import 64bit_\${...}, dilewati"
         fi
