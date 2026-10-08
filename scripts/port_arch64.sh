@@ -10,8 +10,10 @@
 #                                   P_FS B_FS B_IMG WORK
 #
 #  ARCH64_FIX=auto|true|false   auto = jalan hanya kalau donor terdeteksi 64-bit-only
-#  ARCH64_COPY_LIB=false        true = salin juga system/lib + system_ext/lib dari base
-#                               (di panduan opsional: internal tetap aman tanpa ini)
+#  ARCH64_COPY_LIB=auto         auto  = ikut ARCH64_FIX: salin system/lib + system_ext/lib dari base, tapi
+#                                       hanya file yang BELUM ada di donor (tidak menimpa lib donor)
+#                               true  = salin semua dan timpa (persis panduan)
+#                               false = jangan salin (panduan: opsional, internal tetap aman tanpa ini)
 #
 #  Langkah (nomor = nomor di panduan):
 #    1+2  /system/bin/{linker,linker_asan} dan /system/bin/bootstrap/{linker,linker_asan}
@@ -26,7 +28,7 @@
 # =============================================================================
 
 ARCH64_FIX=${ARCH64_FIX:-auto}
-ARCH64_COPY_LIB=${ARCH64_COPY_LIB:-false}
+ARCH64_COPY_LIB=${ARCH64_COPY_LIB:-auto}
 
 # donor tidak punya lib 32-bit? (dua sinyal: folder system/lib kosong/tidak ada, abilist tanpa armeabi-v7a)
 a64_donor_is_64only() {
@@ -122,21 +124,28 @@ arch64_fix() {
         if a64_take "$f"; then chmod 0755 "$sysdir/$f" 2>/dev/null || true; fi
     done
 
-    # --- 3: lib 32-bit (opsional)
-    if is_true "$ARCH64_COPY_LIB"; then
+    # --- 3: lib 32-bit dari base. auto = hanya yang belum ada (tanpa menimpa), true = timpa semua
+    local cp_mode=${ARCH64_COPY_LIB,,} cpo=(-a)
+    case $cp_mode in
+        auto) cpo=(-an) ;;
+        true|on|yes|1) cpo=(-a) ;;
+        false|off|no|0) cp_mode=false ;;
+        *) warn "arch64: ARCH64_COPY_LIB='$ARCH64_COPY_LIB' tidak dikenal (auto|true|false), dianggap auto"; cp_mode=auto; cpo=(-an) ;;
+    esac
+    if [[ $cp_mode == false ]]; then
+        log "arch64: system/lib & system_ext/lib tidak disalin (ARCH64_COPY_LIB=false)"
+    else
         if [[ -d $A64_BASE_SYS/lib ]]; then
-            mkdir -p "$sysdir/lib"; cp -a "$A64_BASE_SYS/lib/." "$sysdir/lib/"
-            ok "arch64: system/lib <- base ($(find "$sysdir/lib" -type f | wc -l) file; libc/libm/libdl/libdl-android = symlink ikut disalin)"
+            mkdir -p "$sysdir/lib"; cp "${cpo[@]}" "$A64_BASE_SYS/lib/." "$sysdir/lib/"
+            ok "arch64: system/lib <- base (mode $cp_mode, sekarang $(find "$sysdir/lib" -type f | wc -l) file; libc/libm/libdl/libdl-android = symlink ikut disalin)"
         else warn "arch64: system/lib tidak ada di base"; fi
         if [[ -z ${A64_BASE_SYS_OVERRIDE:-} && -f $B_IMG/system_ext.img ]]; then
             extract_img "$B_IMG/system_ext.img" "$root"
             if [[ -d $root/system_ext/lib ]]; then
-                mkdir -p "$P_FS/system_ext/lib"; cp -a "$root/system_ext/lib/." "$P_FS/system_ext/lib/"
-                ok "arch64: system_ext/lib <- base"
+                mkdir -p "$P_FS/system_ext/lib"; cp "${cpo[@]}" "$root/system_ext/lib/." "$P_FS/system_ext/lib/"
+                ok "arch64: system_ext/lib <- base (mode $cp_mode)"
             fi
         fi
-    else
-        log "arch64: system/lib & system_ext/lib tidak disalin (opsional, ARCH64_COPY_LIB=true untuk menyalin)"
     fi
 
     # --- 4+5: props odm & vendor
@@ -178,5 +187,5 @@ arch64_fix() {
     [[ $n -gt 0 ]] || log "arch64: mediaserver_dynamic_QCOM.rc tidak ada di donor, bonus mediaserver dilewati"
 
     rm -rf "$root"
-    warn "arch64: panduan ini diuji orang lain di device lain (T2PAS) -> kalau bootloop, mulai dari ARCH64_COPY_LIB=true/false dan cek logcat 'linker'/'vold'/'omx'"
+    warn "arch64: panduan ini diuji orang lain di device lain (T2PAS) -> kalau bootloop, coba ARCH64_COPY_LIB=true / false dan cek logcat 'linker'/'vold'/'omx'"
 }
