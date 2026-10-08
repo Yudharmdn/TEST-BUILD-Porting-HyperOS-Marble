@@ -82,6 +82,8 @@ env:
   VNDK_COMPAT: "true"          # vendor butuh VNDK APEX versi lama -> salin dari ROM base
   LINKER_CHECK: "true"         # laporan dependensi linker ELF vendor/odm (info)
   VINTF_COMPAT: "true"         # FCM level vendor tak dikenal donor -> salin compatibility_matrix.<lv>.xml dari system base ke /system/etc/vintf port
+  ARCH64_FIX: auto             # auto = langkah panduan 64-bit (linker/vold/props/omx) hanya jika donor tanpa lib 32-bit | true | false
+  ARCH64_COPY_LIB: "false"     # true = salin juga system/lib & system_ext/lib dari base (opsional di panduan)
   PROP_MERGE: "true"           # salin props khas device dari product/etc/build.prop base marble
   OVERLAY_FIX: "true"          # buang overlay khas donor, salin overlay khas marble
   AOD_FIX: auto                # auto = patch DevicesAndroidOverlay (DozeService -> SystemUI) hanya kalau donor tak punya com.miui.aod | true | false
