@@ -24,6 +24,7 @@ After merging them, `scripts/port.sh` patches the parts that usually stop a port
 - **VINTF:** the marble vendor is FCM level 6 (Android 12), which Android 17 no longer knows about. The script copies `compatibility_matrix.6.xml` from the base system into `/system/etc/vintf/` of the port (that's the framework side, the VINTF files in `/vendor` and `/odm` are left untouched). It also checks the other direction, making sure everything the vendor's matrix asks for is provided by the framework.
 - **VNDK:** the VNDK v32 APEX is copied from the base into `/system_ext/apex`, and `vendor-ndk 32` is declared in a framework manifest fragment, since newer Android donors don't ship either anymore.
 - **Linker:** every library the vendor/odm binaries need is checked one by one, and the result shows up in the log.
+- **64-bit-only donors:** if the donor ships no 32-bit libs (`ARCH64_FIX=auto` checks `system/lib` and the ABI list), the 64-bit port guide is applied on top of the marble 64-32 vendor: `linker`/`linker_asan` and `vold` from the base, odm/vendor ABI + zygote props, media omx rc/HAL removed, mediaserver import fixed. Donors that are still 64-32 are left alone. Untested on real hardware.
 - **fstab and vbmeta:** `/data` encryption is removed, vendor/odm can be mounted rw, and verity is disabled.
 - **Keyboard:** Gboard is added as a system app, and the Chinese keyboards (Sogou, Baidu, iFlytek) are removed. With no other keyboard left, Gboard becomes the default on its own.
 - **Debloat:** unneeded apps are removed based on `debloat_packages.txt`.
