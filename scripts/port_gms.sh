@@ -33,8 +33,7 @@ gms_from_base() {
     local excl="${GMS_EXCLUDE_DEFAULT}${GMS_EXCLUDE:+|$GMS_EXCLUDE}"
     local pidx="$WORK/gms_port.tsv" bidx="$WORK/gms_base.tsv"
     local re core miss="" base_miss="" pkg dir sz bytes=0 napp=0 ncfg=0 nextra=0 f rel d sub dre
-    local -A seen=()
-    local -a copied=()
+    local -A seen=() seenpkg=()
 
     if [[ $mode == false ]]; then log "GMS: dimatikan (GMS_FROM_BASE=false)"; return 0; fi
     case $scope in
@@ -68,25 +67,25 @@ gms_from_base() {
 
     # ---- folder app
     dre='/(app|priv-app|data-app)/[^/]+$'
-    while IFS=$'\t' read -r pkg dir; do
+    while IFS=$'\t' read -r -u 3 pkg dir; do
         [[ -n $pkg && -n $dir ]] || continue
         [[ $dir == product/* ]] || continue
         [[ $dir =~ $dre ]] || continue
         grep -qE "$re" <<< "$pkg" || continue
         if grep -qiE "$excl" <<< "$pkg $dir"; then continue; fi
         if gms_pkg_in_index "$pkg" "$pidx"; then continue; fi          # donor sudah punya package ini
-        if [[ -n ${seen[$dir]:-} ]]; then continue; fi
-        seen[$dir]=1
+        if [[ -n ${seen[$dir]:-} || -n ${seenpkg[$pkg]:-} ]]; then continue; fi
+        seen[$dir]=1; seenpkg[$pkg]=1
         if [[ -e $P_FS/$dir ]]; then
             warn "GMS: $dir sudah ada di donor dengan package lain, $pkg dilewati"; continue
         fi
         mkdir -p "$P_FS/$(dirname "$dir")"
         cp -a "$B_FS/$dir" "$P_FS/$dir"
+        rm -rf "${P_FS:?}/$dir/oat"   # odex/vdex dari base tidak cocok dengan Android donor
         sz=$(du -sb "$P_FS/$dir" | cut -f1); bytes=$(( bytes + sz )); napp=$((napp + 1))
-        copied+=("$dir")
         ok "GMS: $pkg -> $dir ($(( sz / 1048576 )) MB)"
         base_privapp_perms "$dir"
-    done < "$bidx"
+    done 3< "$bidx"
 
     # ---- konfigurasi: permissions / default-permissions / sysconfig / preferred-apps
     for sub in permissions default-permissions sysconfig preferred-apps; do
