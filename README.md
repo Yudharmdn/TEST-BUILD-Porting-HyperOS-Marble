@@ -25,17 +25,19 @@ After merging them, `scripts/port.sh` patches the parts that usually stop a port
 - **VNDK:** the VNDK v32 APEX is copied from the base into `/system_ext/apex`, and `vendor-ndk 32` is declared in a framework manifest fragment, since newer Android donors don't ship either anymore.
 - **Linker:** every library the vendor/odm binaries need is checked one by one, and the result shows up in the log.
 - **64-bit-only donors:** if the donor ships no 32-bit libs (`ARCH64_FIX=auto` checks `system/lib` and the ABI list), the 64-bit port guide is applied on top of the marble 64-32 vendor: `linker`/`linker_asan` and `vold` from the base, odm/vendor ABI + zygote props, media omx rc/HAL removed, mediaserver import fixed. Donors that are still 64-32 are left alone. Untested on real hardware.
-- **fstab and vbmeta:** `/data` encryption is removed, vendor/odm can be mounted rw, and verity is disabled.
+- **fstab and vbmeta:** `/data` encryption is removed (in `vendor/etc/fstab.qcom` and in the first-stage fstab inside `vendor_boot`), the partitions in `ext4_partitions` are mounted rw, and verity is disabled in `vbmeta` and `vbmeta_system`.
 - **Keyboard:** Gboard is added as a system app, and the Chinese keyboards (Sogou, Baidu, iFlytek) are removed. With no other keyboard left, Gboard becomes the default on its own.
+- **Google apps from the base:** if the donor has no Play Services, GSF or Play Store (typical for China ROMs), they are copied from the base ROM's product partition (`GMS_FROM_BASE=auto`, `GMS_SCOPE=core`). If the donor already has them, nothing is copied.
+- **device_features unlock:** a few extra features are switched on in `marble.xml` and `marblein.xml` (smart FPS at the highest refresh rate, default eye-care mode, AOD fullscreen/always-on). Use the `unlock_features` input to change the list, or `none` to turn it off.
 - **Debloat:** unneeded apps are removed based on `debloat_packages.txt`.
-- **boot.img:** the stock marble kernel from the base ROM is used by default (`BOOT_IMG: ""` in the workflow), which is the safest choice for a first flash. Put a URL in `BOOT_IMG` to use a custom kernel instead. The build then checks that it still has a ramdisk (marble has no init_boot, so first-stage init lives there) and that the kernel is the same 5.10 series as the base, since the modules in vendor_boot and vendor_dlkm are built for it.
+- **boot.img:** the workflow sets `BOOT_IMG` to the custom Melt-Rebase kernel (`Yudharmdn/boot-melt-rebase`), so that kernel replaces the base `boot.img`. Set `BOOT_IMG: ""` in `.github/workflows/port-hyperos.yml` to use the stock marble kernel from the base ROM instead, which is the safest choice for a first flash. The build checks that a custom boot.img still has a ramdisk (marble has no init_boot, so first-stage init lives there) and that the kernel is the same 5.10 series as the base. The modules in `vendor_boot` and `vendor_dlkm` are built for the base kernel, so if only the sublevel differs (for example 5.10.236 vs 5.10.270) the build just prints a warning. If the screen or touch is dead after boot, look for `disagrees about version` or `version magic` in `dmesg`.
 
 ## What's inside the zip
 
 ```
 META-INF/                 installer from xiaomi.eu
 images/abl.img ... xbl_ramdump.img   marble firmware
-images/boot.img           kernel (stock by default)
+images/boot.img           kernel (custom from BOOT_IMG, stock marble if BOOT_IMG is empty)
 images/vendor_boot.img    patched (fstab)
 images/dtbo.img
 images/vbmeta.img, vbmeta_system.img
@@ -59,15 +61,16 @@ A few things are done this way on purpose:
 | `base_rom_url` | link to the xiaomi.eu marble zip (sourceforge). It has to be the recovery zip, since its META-INF is reused as the installer |
 | `port_rom_url` | link to the donor's full OTA zip (the one with `payload.bin` inside) |
 | `super_size` | `9663676416` (marble's super size, leave it as is) |
-| `ext4_partitions` | `vendor odm`, so they can be edited directly on the phone |
+| `ext4_partitions` | default `system system_ext product mi_ext vendor odm vendor_dlkm`: every partition is EXT4 and can be edited directly on the phone. Anything not listed becomes EROFS (read-only). With all seven as EXT4 the super partition is almost full (about 99%); if a donor does not fit, the build fails with a message instead of silently switching to EROFS |
 | `debloat` | extra paths to remove, space separated. Can be left empty |
+| `unlock_features` | extra `device_features` entries as `name:type:value`, space separated. Empty = script defaults, `none` = turn off |
 | `disable_encryption` | leave it `true` |
 | `rw_mount` | leave it `true` |
-| `debug_adb` | `true` while testing (adb is on from boot, handy for logcat). Turn it off once things are stable |
+| `debug_adb` | `true` by default. adb is on from boot (`ro.adb.secure=0`, debuggable), handy for logcat. This is a debug build, so turn it off once things are stable and before sharing the zip |
 | `recovery_img_url` | leave it empty |
 | `release_repo` | empty = output goes to Artifacts. Set it to `owner/repo` to upload to a Release instead (needs the `RELEASE_TOKEN` secret) |
 
-4. Wait for it to finish, then grab the zip from the **Artifacts** section of the run page. Artifacts are kept for 7 days.
+4. Wait for it to finish, then grab the zip from the **Artifacts** section of the run page. The zip is kept for 90 days. If the build fails, the working logs are uploaded as a separate artifact for 7 days.
 
 If the build fails, open the **Port ROM** step in the log. Every stage has a header (0/7 through 7/7), and the `[warn]` or `[fail]` lines usually point right at the problem.
 
@@ -90,8 +93,8 @@ Some apps are removed through `debloat_packages.txt`, so a few things are on you
 
 - **Browser:** there is none. Xiaomi's browser is on the debloat list and the donor ROMs used so far don't ship Chrome. Have a Chrome or other browser APK ready.
 - **Google apps:** whatever the donor ships stays. xiaomi.eu donors come with Play Store and Play Services, official Chinese OTAs usually don't. The build log lists them under `Google:`.
-- **NFC:** disabled (`NQNfcNci` is removed). If you need NFC, delete that line from `debloat_packages.txt` and rebuild.
-- **Other things that are gone:** Print, SIM Toolkit, the QR Scanner, Find Device, and Joyose (game profiles).
+- **NFC:** not removed. Nothing in `debloat_packages.txt` touches it. If you want it gone, add the NFC app to that list.
+- **Other things that are gone:** Print, SIM Toolkit, the QR Scanner, Find Device, Joyose (game profiles), the Downloads app UI (the download provider stays), Notes, Music, Sound Recorder, Compass, Health and Mi Share. `debloat_packages.txt` is the full list, and the build log shows what was actually removed.
 
 ## Tweaking the debloat list
 
@@ -116,10 +119,11 @@ The `devices/marble/` folder holds files that get copied over the ROM before it'
 ```
 devices/marble/product/etc/device_features/   marble.xml, marblein.xml
 devices/marble/product/etc/displayconfig/     display & brightness config
-devices/marble/product/overlay/               DevicesOverlay.apk, DevicesAndroidOverlay.apk
+devices/marble/product/overlay/               DevicesOverlay.apk, DevicesAndroidOverlay.apk,
+                                              AospFrameworkResOverlay.apk, MiuiFrameworkResOverlay.apk
 ```
 
-If there's anything else you want forced to the marble version, just drop it in here using the same folder structure as in the ROM.
+These are copied after the files taken straight from the base ROM, so when the same file exists in both places, the one in this folder wins. If there's anything else you want forced to the marble version, just drop it in here using the same folder structure as in the ROM.
 
 ## If it bootloops
 
@@ -148,6 +152,8 @@ scripts/fstab_patch.py               patches fstab
 scripts/prop_merge.py                merges marble props into the port
 scripts/prop_effective.py            shows which props actually apply at boot (init load order)
 scripts/port_extras.sh               AOD overlay, Millet, device_features unlock, files from base
+scripts/port_arch64.sh               64-bit-only donor fixes on top of the 64-32 marble vendor (ARCH64_FIX)
+scripts/port_gms.sh                  copies Play Services / GSF / Play Store from the base when the donor has none
 scripts/device_features_unlock.py    turns on features in device_features/*.xml
 scripts/jar_smali_patch.py           patches SystemServerImpl in miui-services.jar (xiaomi.eu donors)
 scripts/vintf_check.py               checks VINTF, vendor vs framework
