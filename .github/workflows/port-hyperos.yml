@@ -25,9 +25,9 @@ on:
         default: "9663676416"
         type: string
       ext4_partitions:
-        description: "Partisi yang dibangun EXT4 (sisanya EROFS)"
+        description: "Partisi yang dibangun EXT4 (sisanya EROFS). Pilihan: system system_ext product mi_ext vendor odm vendor_dlkm"
         required: false
-        default: "vendor odm"
+        default: "system system_ext product mi_ext vendor odm vendor_dlkm"
         type: string
       debloat:
         description: "Debloat tambahan: package / folder / path, pisah spasi (mis. product/app/Foo)"
@@ -78,12 +78,16 @@ env:
   PORT_PARTITIONS: "system system_ext product mi_ext"
   DISABLE_AVB: "true"
   EROFS_COMP: "lz4hc,9"
-  EXT4_HEADROOM_MB: "128"
+  EXT4_HEADROOM_MB: "32"       # ruang bebas tambahan tiap partisi EXT4 rw (MB). Kecil supaya semua partisi ext4 muat di super
+  EXT4_MARGIN_PCT: "104"       # ukuran awal ext4 = isi x persen ini; kurang -> retry otomatis
+  EXT4_RETRY_PCT: "105"        # tiap retry e2fsdroid: besarkan sekian persen
   VNDK_COMPAT: "true"          # vendor butuh VNDK APEX versi lama -> salin dari ROM base
   LINKER_CHECK: "true"         # laporan dependensi linker ELF vendor/odm (info)
   VINTF_COMPAT: "true"         # FCM level vendor tak dikenal donor -> salin compatibility_matrix.<lv>.xml dari system base ke /system/etc/vintf port
   ARCH64_FIX: auto             # auto = langkah panduan 64-bit (linker/vold/props/omx) hanya jika donor tanpa lib 32-bit | true | false
   ARCH64_COPY_LIB: auto        # auto = salin system/lib & system_ext/lib base hanya yang belum ada di donor | true = timpa semua | false = jangan salin
+  GMS_FROM_BASE: auto          # auto = donor tanpa gms/gsf/Play Store -> salin dari product base | true = selalu lengkapi | false = mati
+  GMS_SCOPE: core              # core = gms + gsf + vending + pendukung | all = semua com.google.android.* (kecuali WebView/Chrome/keyboard)
   PROP_MERGE: "true"           # salin props khas device dari product/etc/build.prop base marble
   OVERLAY_FIX: "true"          # buang overlay khas donor, salin overlay khas marble
   AOD_FIX: auto                # auto = patch DevicesAndroidOverlay (DozeService -> SystemUI) hanya kalau donor tak punya com.miui.aod | true | false
@@ -100,7 +104,7 @@ env:
   EU_SYSTEMSERVER_PATCH: "true"  # donor xiaomi.eu: kosongkan constructor SystemServerImpl (miui-services.jar), seperti toraidl
   DEBLOAT_PRESET: none         # debloat hanya dari debloat_packages.txt (safe = + hapus semua data-app)
   DEBLOAT_SAFE_KEEP: "MIUIGallery"   # folder data-app yang dipertahankan (pisah spasi)
-  FIT_FALLBACK_EROFS: "true"   # super tidak muat -> vendor/odm otomatis EROFS
+  FIT_FALLBACK_EROFS: "false"  # false = super tidak muat -> build gagal dengan pesan jelas (tidak diam-diam jadi EROFS) | true = vendor/odm otomatis EROFS
   ZIP_LEVEL: "6"                # 1 = cepat/zip besar ... 9 = paling kecil (tahap zip lebih lama)
   TOOLKIT_REPO: toraidl/hyperos_port
   TOOLKIT_SHA: 523b0f6378e77e9e93ba6e15a064f45b26274eab
