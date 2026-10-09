@@ -7,6 +7,10 @@
 #  Output: zip flashable recovery (META-INF/ + images/), untuk OrangeFox/TWRP.
 #  INSTALLER=base: META-INF & layout images/super.img.N disamakan dengan zip base.
 #
+#  Semua partisi bisa EXT4 + rw lewat EXT4_PARTITIONS (termasuk product, mi_ext,
+#  vendor_dlkm). Supaya muat di super: EXT4_HEADROOM_MB kecil (default 32),
+#  EXT4_MARGIN_PCT 104, FIT_FALLBACK_EROFS=false (gagal jelas, bukan diam-diam EROFS).
+#
 #  Semua setting lewat env (key=value), default di bawah.
 # =============================================================================
 set -Eeuo pipefail
@@ -30,7 +34,9 @@ REPLACE_FROM_BASE=${REPLACE_FROM_BASE:-"device_features displayconfig overlay ca
 UNLOCK_FEATURES=${UNLOCK_FEATURES:-"support_smart_fps:bool:true smart_fps_value:integer:auto default_eyecare_mode:integer:2 paper_eyecare_default_texture:integer:0 support_aod_fullscreen:bool:true support_aod_aon:bool:true"}
 DEBLOAT=${DEBLOAT:-""}
 EROFS_COMP=${EROFS_COMP:-"lz4hc,9"}
-EXT4_HEADROOM_MB=${EXT4_HEADROOM_MB:-128}
+EXT4_HEADROOM_MB=${EXT4_HEADROOM_MB:-32}   # ruang bebas tambahan tiap partisi EXT4 rw (MB)
+EXT4_MARGIN_PCT=${EXT4_MARGIN_PCT:-104}    # ukuran awal ext4 = isi x persen ini (kurang -> retry otomatis)
+EXT4_RETRY_PCT=${EXT4_RETRY_PCT:-105}      # e2fsdroid kekurangan ruang -> besarkan sekian persen per percobaan
 DEBLOAT_KEEP=""
 VNDK_COMPAT=${VNDK_COMPAT:-true}           # vendor butuh VNDK APEX versi lama -> salin dari system/system_ext base
 LINKER_CHECK=${LINKER_CHECK:-true}         # laporan dependensi linker ELF vendor/odm (info)
@@ -49,7 +55,7 @@ KEEP_DOWNLOADS=${KEEP_DOWNLOADS:-false}
 DEBLOAT_PACKAGES_FILE=${DEBLOAT_PACKAGES_FILE:-}   # default: <repo>/debloat_packages.txt
 DEBLOAT_PRESET=${DEBLOAT_PRESET:-none}     # none | safe (= + hapus semua data-app)
 DEBLOAT_SAFE_KEEP=${DEBLOAT_SAFE_KEEP:-"MIUIGallery"}  # folder data-app yang tidak ikut dihapus preset safe
-FIT_FALLBACK_EROFS=${FIT_FALLBACK_EROFS:-true}  # super tidak muat -> vendor/odm otomatis EROFS
+FIT_FALLBACK_EROFS=${FIT_FALLBACK_EROFS:-false}  # true: super tidak muat -> vendor/odm otomatis EROFS. false: build gagal dengan pesan jelas
 EXTRACT_EROFS=${EXTRACT_EROFS:-}           # opsional: extract.erofs versi baru (dicoba duluan)
 WORK=${WORK:-$PWD/work}
 OUT=${OUT:-$PWD/out}
@@ -105,6 +111,8 @@ need() { local t; for t in "$@"; do command -v "$t" >/dev/null || die "tool tida
 source "$SCRIPT_DIR/port_extras.sh"
 # shellcheck source=port_arch64.sh
 source "$SCRIPT_DIR/port_arch64.sh"
+# shellcheck source=port_gms.sh
+source "$SCRIPT_DIR/port_gms.sh"
 
 # ------------------------------------------------------------------ fetch
 fetch() { # src dest_dir name -> echo path
@@ -362,19 +370,23 @@ repack_erofs() { # root name out_img
         "$img" "$root/$name" >/dev/null
 }
 
+# ext4: ukuran = isi x EXT4_MARGIN_PCT% (+ inode, + headroom kalau rw). e2fsdroid kekurangan
+# ruang -> besarkan EXT4_RETRY_PCT% lalu ulangi. Image rw tanpa resize_inode (seperti build AOSP)
+# supaya tidak membuang puluhan MB untuk GDT cadangan.
 repack_ext4() { # root name out_img rw(true/false)
-    local root=$1 name=$2 img=$3 rw=$4 inodes blocks try=0 share=(-s)
+    local root=$1 name=$2 img=$3 rw=$4 inodes blocks try=0 share=(-s) feat="^has_journal"
     prep_config "$root" "$name"
     inodes=$(( $(wc -l < "$root/config/${name}_fs_config") + 64 ))
     blocks=$(du -s --block-size=4096 "$root/$name" | cut -f1)
-    blocks=$(( blocks * 110 / 100 + inodes / 16 + 2048 ))
+    blocks=$(( blocks * EXT4_MARGIN_PCT / 100 + inodes / 16 + 2048 ))
     if is_true "$rw"; then
         share=()
+        feat+=",^resize_inode"
         blocks=$(( blocks + EXT4_HEADROOM_MB * 256 ))
     fi
     while :; do
         rm -f "$img"
-        mke2fs -q -O ^has_journal -L "$name" -I 256 -N "$inodes" -M "/$name" -m 0 \
+        mke2fs -q -O "$feat" -L "$name" -I 256 -N "$inodes" -M "/$name" -m 0 \
                -t ext4 -b 4096 "$img" "$blocks" >/dev/null
         if e2fsdroid -e -T "$FIXED_TS" "${share[@]}" \
                -C "$root/config/${name}_fs_config" \
@@ -383,13 +395,14 @@ repack_ext4() { # root name out_img rw(true/false)
             break
         fi
         try=$((try + 1))
-        [[ $try -lt 4 ]] || { cat "$WORK/e2fsdroid.log" >&2; die "e2fsdroid $name gagal"; }
-        warn "$name: ruang ext4 kurang, perbesar 20% (percobaan $try)"
-        blocks=$(( blocks * 120 / 100 ))
+        [[ $try -lt 7 ]] || { cat "$WORK/e2fsdroid.log" >&2; die "e2fsdroid $name gagal"; }
+        warn "$name: ruang ext4 kurang, perbesar ${EXT4_RETRY_PCT}% (percobaan $try)"
+        blocks=$(( blocks * EXT4_RETRY_PCT / 100 ))
     done
     if ! is_true "$rw"; then
         resize2fs -f -M "$img" >/dev/null 2>&1 || true
     fi
+    log "  $name ext4: $(( $(stat -c%s "$img") / 1048576 )) MB (rw=$rw)"
 }
 
 # ------------------------------------------------------------------ cek VINTF
@@ -1180,14 +1193,21 @@ patch_fstab_file() {
 }
 
 patch_vendor_fstab() {
-    local f found=0
+    local f found=0 p
     while IFS= read -r -d '' f; do
         log "fstab vendor: ${f#"$B_FS"/}"
         patch_fstab_file "$f"; found=1
     done < <(if [[ -d $B_FS/vendor/etc ]]; then find "$B_FS/vendor/etc" -maxdepth 1 -type f -name 'fstab.*' -print0; fi)
     if [[ $found != 1 ]]; then
         warn "fstab di vendor/etc tidak ditemukan"
+        return 0
     fi
+    # tiap partisi EXT4 harus punya baris mount di fstab vendor; kalau tidak, init tidak me-mount-nya
+    for p in $EXT4_PARTITIONS; do
+        if ! grep -qE "^[^#]*[[:space:]]/$p[[:space:]]" "$B_FS"/vendor/etc/fstab.* 2>/dev/null; then
+            warn "fstab: mount point /$p tidak ada di vendor/etc/fstab.* -> $p EXT4 kemungkinan tidak ter-mount (bootloop). Keluarkan $p dari ext4_partitions"
+        fi
+    done
 }
 
 patch_vendor_boot() {
@@ -1281,13 +1301,17 @@ sum_images() { # total byte semua image di OUT_IMG_TMP
 }
 
 # kalau tidak muat di super: vendor/odm EXT4 dibangun ulang sebagai EROFS (lebih kecil)
+# hanya kalau FIT_FALLBACK_EROFS=true. Kalau false, fungsi ini cuma melapor dan build_super yang gagal.
 fit_super() {
     local total p new="" sz cand=() root
     resolve_super
     total=$(sum_images)
     log "cek muat: $(( total / 1048576 )) MB / $(( SUPER_GMAX / 1048576 )) MB"
     [[ $total -gt $SUPER_GMAX ]] || return 0
-    if ! is_true "$FIT_FALLBACK_EROFS"; then return 0; fi
+    if ! is_true "$FIT_FALLBACK_EROFS"; then
+        warn "tidak muat: kurang $(( (total - SUPER_GMAX) / 1048576 )) MB (FIT_FALLBACK_EROFS=false, tidak ada konversi otomatis ke EROFS)"
+        return 0
+    fi
     # partisi EXT4 terbesar dulu dibangun ulang sebagai EROFS, berhenti begitu muat
     for p in $EXT4_PARTITIONS; do
         sz=$(stat -c%s "$OUT_IMG_TMP/$p.img" 2>/dev/null || echo 0)
@@ -1296,7 +1320,7 @@ fit_super() {
     while read -r sz p; do
         [[ -n $p ]] || continue
         if [[ $total -le $SUPER_GMAX ]]; then new+="${new:+ }$p"; continue; fi
-        case $p in vendor|odm) root=$B_FS ;; *) root=$P_FS ;; esac
+        case $p in vendor|odm|vendor_dlkm) root=$B_FS ;; *) root=$P_FS ;; esac
         if [[ -d $root/$p ]]; then
             warn "super tidak muat: $p ($(( sz / 1048576 )) MB) dibangun ulang sebagai EROFS (read-only, tidak bisa rw)"
             repack_erofs "$root" "$p" "$OUT_IMG_TMP/$p.img"
@@ -1334,7 +1358,8 @@ build_super() {
                --partition "${p}_b:$attr:0:${grp}_b")
     done
     printf '  %-14s %12d / %d bytes (%d%%)\n' TOTAL "$total" "$gmax" $(( total * 100 / gmax ))
-    [[ $total -le $gmax ]] || die "partisi melebihi kapasitas super ($(( total / 1048576 )) MB > $(( gmax / 1048576 )) MB). Tambah path di input debloat (lihat daftar '25 aplikasi terbesar' di tahap 4) atau kosongkan ext4_partitions."
+    printf '  %-14s %12d bytes (%d MB)\n' SISA "$(( gmax - total ))" $(( (gmax - total) / 1048576 ))
+    [[ $total -le $gmax ]] || die "partisi melebihi kapasitas super ($(( total / 1048576 )) MB > $(( gmax / 1048576 )) MB, kurang $(( (total - gmax) / 1048576 )) MB). Kecilkan EXT4_HEADROOM_MB / EXT4_MARGIN_PCT, tambah path di input debloat (lihat daftar '25 aplikasi terbesar' di tahap 4), atau kurangi ext4_partitions."
     # installer kita menulis super pakai dd -> raw; installer base (xiaomi.eu) memakai sparse
     if [[ ${SUPER_SPARSE:-false} == true ]]; then args+=(--sparse); fi
     if ! lpmake "${args[@]}" --output "$out" >"$WORK/lpmake.log" 2>&1; then
@@ -1599,6 +1624,16 @@ main() {
     OUT_IMG_TMP="$WORK/super_parts"
     mkdir -p "$OUT_IMG_TMP"
 
+    # partisi base yang diekstrak lalu dibangun ulang: vendor & odm selalu (dipatch),
+    # vendor_dlkm hanya kalau diminta EXT4 (kalau tidak, dipakai apa adanya dari base)
+    BASE_REBUILD="vendor odm"
+    if in_list vendor_dlkm "$EXT4_PARTITIONS"; then BASE_REBUILD+=" vendor_dlkm"; fi
+    for p in $EXT4_PARTITIONS; do
+        if ! in_list "$p" "$PORT_PARTITIONS $BASE_REBUILD"; then
+            die "ext4_partitions: '$p' tidak dikenal. Pilihan: $PORT_PARTITIONS $BASE_REBUILD"
+        fi
+    done
+
     # ---------------- 1. BASE
     group_start "0/7 Cek input & URL"
     if [[ $SUPER_SIZE != auto ]]; then
@@ -1613,6 +1648,9 @@ main() {
         lz4|lz4hc) ;;
         *) die "EROFS_COMP '${EROFS_COMP}' tidak bisa dibaca kernel 5.10 marble (partisi gagal mount = bootloop). Pakai lz4hc atau lz4" ;;
     esac
+    [[ $EXT4_MARGIN_PCT =~ ^[0-9]+$ && $EXT4_MARGIN_PCT -ge 100 ]] || die "EXT4_MARGIN_PCT harus angka >= 100, bukan '$EXT4_MARGIN_PCT'"
+    [[ $EXT4_RETRY_PCT =~ ^[0-9]+$ && $EXT4_RETRY_PCT -gt 100 ]] || die "EXT4_RETRY_PCT harus angka > 100, bukan '$EXT4_RETRY_PCT'"
+    [[ $EXT4_HEADROOM_MB =~ ^[0-9]+$ ]] || die "EXT4_HEADROOM_MB harus angka (MB), bukan '$EXT4_HEADROOM_MB'"
     check_url BASE_ROM "$BASE_ROM"
     check_url PORT_ROM "$PORT_ROM"
     if [[ -n $RECOVERY_IMG ]]; then check_url RECOVERY_IMG "$RECOVERY_IMG"; fi
@@ -1643,6 +1681,9 @@ main() {
             die "base ROM tidak menghasilkan $p.img (super tidak ditemukan/tidak terbaca). Pakai zip recovery xiaomi.eu marble, fastboot ROM .tgz, atau OTA zip (payload.bin). Lihat daftar 'isi ROM' di atas."
         fi
     done
+    if in_list vendor_dlkm "$EXT4_PARTITIONS" && [[ ! -f $B_IMG/vendor_dlkm.img ]]; then
+        die "ext4_partitions berisi vendor_dlkm tapi base ROM tidak punya vendor_dlkm.img"
+    fi
     # INSTALLER=base butuh META-INF dari zip base: cek sekarang, bukan setelah 20 menit build
     if [[ $INSTALLER == base && ! -d $WORK/base_META-INF ]]; then
         die "INSTALLER=base tapi ROM base tidak punya META-INF (fastboot .tgz / OTA payload tidak punya installer recovery). Pakai zip xiaomi.eu marble, atau set INSTALLER: ours di workflow"
@@ -1660,11 +1701,11 @@ main() {
 
     # ---------------- 3. EXTRACT
     group_start "3/7 Ekstrak filesystem"
-    for p in vendor odm product; do
+    for p in $BASE_REBUILD product; do
         [[ -f $B_IMG/$p.img ]] || continue
         log "ekstrak base $p"; extract_img "$B_IMG/$p.img" "$B_FS"
     done
-    rm -f "$B_IMG/vendor.img" "$B_IMG/odm.img"   # dibangun ulang
+    for p in $BASE_REBUILD; do rm -f "$B_IMG/$p.img"; done   # dibangun ulang
     for p in $PORT_PARTITIONS; do
         [[ -f $P_IMG/$p.img ]] || continue
         log "ekstrak port $p"; extract_img "$P_IMG/$p.img" "$P_FS"; rm -f "$P_IMG/$p.img"
@@ -1714,6 +1755,7 @@ main() {
     props_effective
     if is_true "$OVERLAY_FIX"; then fix_overlays "$donor" "$base_dev"; fi
     report_app_sizes
+    gms_from_base   # donor tanpa GMS/Play Store -> salin dari product base (GMS_FROM_BASE=auto|true|false)
     patch_port_resources
     apply_device_files
     fix_aod_overlay
@@ -1740,7 +1782,7 @@ main() {
             rm -rf "${P_FS:?}/$p"
         fi
     done
-    for p in vendor odm; do
+    for p in $BASE_REBUILD; do
         [[ -d $B_FS/$p ]] || continue
         if in_list "$p" "$EXT4_PARTITIONS"; then
             log "repack base $p (ext4, rw=$RW_MOUNT)"; repack_ext4 "$B_FS" "$p" "$OUT_IMG_TMP/$p.img" "$RW_MOUNT"
@@ -1748,7 +1790,7 @@ main() {
             log "repack base $p (erofs)"; repack_erofs "$B_FS" "$p" "$OUT_IMG_TMP/$p.img"
         fi
     done
-    # partisi logical base lain dipakai apa adanya (vendor_dlkm, system_dlkm, ...)
+    # partisi logical base lain dipakai apa adanya (system_dlkm, odm_dlkm, vendor_dlkm kalau bukan EXT4, ...)
     for p in $logical; do
         [[ -f $OUT_IMG_TMP/$p.img ]] && continue
         if [[ -f $B_IMG/$p.img ]]; then mv "$B_IMG/$p.img" "$OUT_IMG_TMP/$p.img"; log "pakai base apa adanya: $p"; fi
@@ -1757,7 +1799,7 @@ main() {
     fit_super
     # folder EXT4 disimpan sampai fit_super (bisa dibangun ulang sebagai EROFS), baru dibuang
     for p in $PORT_PARTITIONS; do rm -rf "${P_FS:?}/$p"; done
-    rm -rf "${B_FS:?}/vendor" "${B_FS:?}/odm"
+    for p in $BASE_REBUILD; do rm -rf "${B_FS:?}/$p"; done
     ls -la "$OUT_IMG_TMP"; dfree
     group_end
 
