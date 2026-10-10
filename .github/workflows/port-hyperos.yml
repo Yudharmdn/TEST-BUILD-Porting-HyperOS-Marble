@@ -89,7 +89,7 @@ env:
   GMS_FROM_BASE: auto          # auto = donor tanpa gms/gsf/Play Store -> salin dari product base | true = selalu lengkapi | false = mati
   GMS_SCOPE: core              # core = gms + gsf + vending + pendukung | all = semua com.google.android.* (kecuali WebView/Chrome/keyboard)
   BROWSER_FALLBACK: auto       # auto = ROM donor (setelah debloat) tanpa browser -> pasang Chrome | true = selalu | false = mati
-  CHROME_APK: ""               # URL APK Chrome (com.android.chrome; bundle .apkm/.xapk juga boleh). Kosong = coba Chrome dari ROM base
+  CHROME_APK: "https://github.com/Yudharmdn/boot-melt-rebase/releases/download/boot-melt-rebase/com.android.chrome.apkm"               # URL APK Chrome (com.android.chrome; bundle .apkm/.xapk juga boleh). Kosong = coba Chrome dari ROM base
   CHROME_FROM_BASE: "true"     # CHROME_APK kosong -> salin Chrome dari product base kalau ada
   PROP_MERGE: "true"           # salin props khas device dari product/etc/build.prop base marble
   OVERLAY_FIX: "true"          # buang overlay khas donor, salin overlay khas marble
