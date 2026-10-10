@@ -74,7 +74,6 @@ DownloadProviderUi                         | aplikasi Downloads (provider tetap 
 # ---- Xiaomi
 PersonalAssistant                          | App Vault / widget kiri home
 TouchAssistant                             | Quick Ball
-CloudBackup
 FindDevice                                 | Find Device
 Mirror                                     | Xiaomi screen mirroring
 MiLinkService                              | HyperConnect / cast
