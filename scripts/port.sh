@@ -113,6 +113,8 @@ source "$SCRIPT_DIR/port_extras.sh"
 source "$SCRIPT_DIR/port_arch64.sh"
 # shellcheck source=port_gms.sh
 source "$SCRIPT_DIR/port_gms.sh"
+# shellcheck source=port_chrome.sh
+source "$SCRIPT_DIR/port_chrome.sh"
 
 # ------------------------------------------------------------------ fetch
 fetch() { # src dest_dir name -> echo path
@@ -1758,6 +1760,7 @@ main() {
     gms_from_base   # donor tanpa GMS/Play Store -> salin dari product base (GMS_FROM_BASE=auto|true|false)
     patch_port_resources
     apply_device_files
+    browser_fallback   # setelah debloat: ROM tanpa browser -> pasang Chrome (BROWSER_FALLBACK=auto|true|false)
     fix_aod_overlay
     millet_fix
     unlock_device_features
