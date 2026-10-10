@@ -114,6 +114,7 @@ product/data-app/SuperWallpaperEarth
 product/data-app/SuperWallpaperMars
 product/data-app/MiBrowser
 product/data-app/MiuiVideoPlayer
+product/app/MiMediaEditor
 
 # ============================================================================
 # KEEP - tidak pernah dihapus (awalan '!'). Mengalahkan semua daftar di atas.
